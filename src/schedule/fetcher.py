@@ -84,9 +84,50 @@ async def fetch_details_async(urls: list[str]) -> dict[str, str]:
     }
 
 
+_CAPACITY_URL = "https://www.pcc.edu/schedule/capacity/"
+_CAPACITY_HEADERS = {
+    **_HEADERS,
+    "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+    "X-Requested-With": "XMLHttpRequest",
+    "Origin": "https://www.pcc.edu",
+    "Referer": "https://www.pcc.edu/schedule/",
+}
+
+
+async def fetch_capacity_async(
+    crns: list[str], term: str = "summer2026"
+) -> dict[str, dict]:
+    """Fetch real seat counts for a list of CRNs.
+
+    Returns dict mapping CRN → {"seat": [available, total], "wait": [available, total]}.
+    """
+    if not crns:
+        return {}
+    term_code = TERM_CODES.get(term, "202603")
+    crn_list = ",".join(crns)
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
+            resp = await client.post(
+                _CAPACITY_URL,
+                data={"term": term_code, "crn": crn_list},
+                headers=_CAPACITY_HEADERS,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            logger.debug(f"Capacity API: {len(data)} CRNs returned")
+            return data if isinstance(data, dict) else {}
+    except Exception as e:
+        logger.error(f"Capacity API failed: {e}")
+        return {}
+
+
 def fetch_listings(subjects: list[str], term: str = "summer2026") -> dict[str, str]:
     return asyncio.run(fetch_listings_async(subjects, term))
 
 
 def fetch_details(urls: list[str]) -> dict[str, str]:
     return asyncio.run(fetch_details_async(urls))
+
+
+def fetch_capacity(crns: list[str], term: str = "summer2026") -> dict[str, dict]:
+    return asyncio.run(fetch_capacity_async(crns, term))

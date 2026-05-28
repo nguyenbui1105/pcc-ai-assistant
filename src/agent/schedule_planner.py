@@ -4,7 +4,7 @@ import asyncio
 from loguru import logger
 
 from src.mypcc.parser import DegreeAudit
-from src.schedule.fetcher import TERM_LABELS, fetch_details_async, fetch_listings_async
+from src.schedule.fetcher import TERM_LABELS, fetch_capacity_async, fetch_details_async, fetch_listings_async
 from src.schedule.gap_analyzer import analyze_gaps, get_unique_subjects, course_to_requirement
 from src.schedule.optimizer import (
     SchedulePrefs,
@@ -96,7 +96,29 @@ async def _collect_sections(audit: DegreeAudit, term: str) -> list[CourseSection
         sections = parse_detail_html(html, info.course_code, info.title)
         all_sections.extend(sections)
 
+    # Enrich with real seat counts from capacity API
+    crns = [s.crn for s in all_sections if s.crn]
+    if crns:
+        capacity = await fetch_capacity_async(crns, term)
+        _merge_capacity(all_sections, capacity)
+
     return all_sections
+
+
+def _merge_capacity(sections: list[CourseSection], capacity: dict) -> None:
+    """Write real seat counts from capacity API response into section objects."""
+    for sec in sections:
+        data = capacity.get(sec.crn)
+        if not data:
+            continue
+        seat = data.get("seat", [-1, -1])
+        wait = data.get("wait", [-1, -1])
+        if len(seat) >= 2:
+            sec.seats_available = int(seat[0])
+            sec.seats_total = int(seat[1])
+        if len(wait) >= 2:
+            sec.waitlist_available = int(wait[0])
+            sec.waitlist_total = int(wait[1])
 
 
 def _inperson_credits(sections: list[CourseSection]) -> int:
@@ -160,6 +182,12 @@ def _format_plan(
             detail_parts.append(sec.date_range)
         if sec.instructor:
             detail_parts.append(f"👨‍🏫 {sec.instructor}")
+        if sec.seats_available >= 0 and sec.seats_total > 0:
+            detail_parts.append(f"🪑 {sec.seats_available}/{sec.seats_total} open")
+        elif sec.seats == 0:
+            detail_parts.append("⛔ Full")
+        if sec.waitlist_total > 0:
+            detail_parts.append(f"waitlist {sec.waitlist_available}/{sec.waitlist_total}")
         if sec.fees:
             detail_parts.append(f"fees {sec.fees}")
         lines.append("  " + " | ".join(detail_parts))

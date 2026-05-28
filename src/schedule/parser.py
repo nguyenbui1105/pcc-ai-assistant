@@ -34,7 +34,11 @@ class CourseSection:
     course_code: str = ""
     title: str = ""
     crn: str = ""
-    seats: int = 0
+    seats: int = 0             # boolean flag from HTML: 1=open, 0=full
+    seats_available: int = -1  # real count from capacity API (-1 = not fetched)
+    seats_total: int = -1
+    waitlist_available: int = -1
+    waitlist_total: int = -1
     section_type: str = ""     # "In-person lecture", "Online", "Hybrid"
     location: str = ""
     days: str = ""             # "Saturday", "Monday and Wednesday"
@@ -46,7 +50,8 @@ class CourseSection:
 
     @property
     def is_open(self) -> bool:
-        # data-seats is a boolean flag: 1 = has seats, 0 = full/closed
+        if self.seats_available >= 0:
+            return self.seats_available > 0
         return self.seats > 0
 
     def summary(self) -> str:
@@ -62,8 +67,12 @@ class CourseSection:
             parts.append(self.date_range)
         if self.instructor:
             parts.append(self.instructor)
-        # data-seats=1 means open; exact count is JS-rendered — show "Open" / "Full"
-        parts.append("Open" if self.seats > 0 else "Full")
+        if self.seats_available >= 0 and self.seats_total > 0:
+            parts.append(f"{self.seats_available}/{self.seats_total} open")
+            if self.waitlist_total > 0:
+                parts.append(f"waitlist {self.waitlist_available}/{self.waitlist_total}")
+        else:
+            parts.append("Open" if self.seats > 0 else "Full")
         if self.fees:
             parts.append(f"fees {self.fees}")
         return " | ".join(parts)

@@ -234,7 +234,8 @@ def _tool_get_my_finances(session: AgentSession) -> str:
 
 async def _tool_find_courses(subjects: list[str], term: str, session: AgentSession) -> str:
     from src.agent.course_recommender import _is_completed
-    from src.schedule.fetcher import fetch_details_async, fetch_listings_async
+    from src.schedule.fetcher import fetch_capacity_async, fetch_details_async, fetch_listings_async
+    from src.agent.schedule_planner import _merge_capacity
     from src.schedule.parser import parse_detail_html, parse_listing_html
 
     subjects = [s.upper() for s in subjects[:6]]
@@ -259,6 +260,19 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
     url_to_info = {c.detail_url: c for c in to_fetch if c.detail_url}
     html_map = await fetch_details_async(urls[:12])
 
+    # Collect all sections then enrich with real seat counts
+    all_sections_map: dict[str, list] = {}
+    for course in to_fetch:
+        html = html_map.get(course.detail_url, "")
+        if html:
+            secs = parse_detail_html(html, course.course_code, course.title)
+            all_sections_map[course.detail_url] = secs
+    all_flat = [s for secs in all_sections_map.values() for s in secs]
+    if all_flat:
+        crns = [s.crn for s in all_flat if s.crn]
+        capacity = await fetch_capacity_async(crns, term)
+        _merge_capacity(all_flat, capacity)
+
     lines: list[str] = [f"Available courses for {term}:"]
     found_any = False
 
@@ -268,10 +282,7 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
             continue
         subj_lines: list[str] = []
         for course in courses:
-            html = html_map.get(course.detail_url, "")
-            if not html:
-                continue
-            sections = parse_detail_html(html, course.course_code, course.title)
+            sections = all_sections_map.get(course.detail_url, [])
             open_secs = [s for s in sections if s.is_open][:3]
             if not open_secs:
                 continue
@@ -280,8 +291,12 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
             for sec in open_secs:
                 mode = sec.section_type or "?"
                 schedule = " ".join(filter(None, [sec.days, sec.time]))
+                seats_str = (
+                    f"{sec.seats_available}/{sec.seats_total} seats"
+                    if sec.seats_available >= 0 else "open"
+                )
                 subj_lines.append(
-                    f"    CRN {sec.crn} | {mode} | {schedule} | {sec.instructor} | {sec.date_range}"
+                    f"    CRN {sec.crn} | {mode} | {schedule} | {sec.instructor} | {sec.date_range} | {seats_str}"
                 )
         if subj_lines:
             lines.append(f"\n[{subj}]")
