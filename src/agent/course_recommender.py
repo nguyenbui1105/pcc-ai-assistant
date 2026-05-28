@@ -198,6 +198,7 @@ async def recommend_courses_async(
     term: str | None = None,
     profile_hints: str = "",
     is_f1: bool = False,
+    academic_state=None,  # AcademicState | None — canonical source of truth
 ) -> str:
     if not audit.degree:
         return (
@@ -213,6 +214,24 @@ async def recommend_courses_async(
     profile = infer_profile(audit, is_f1=is_f1)
     if profile_hints:
         profile = enrich_profile_from_text(profile, profile_hints)
+
+    # Use canonical AcademicState when available — gives us completed_all
+    # (completed + in_progress) and pre-filtered remaining requirements.
+    if academic_state is not None:
+        from src.mypcc.parser import DegreeRequirement as _DR
+        from src.mypcc.parser import DegreeAudit as _DA
+        audit = _DA(
+            degree=academic_state.degree,
+            gpa=academic_state.gpa,
+            credits_applied=academic_state.credits_applied,
+            credits_required=academic_state.credits_required,
+            status=academic_state.audit_status,
+            requirements=[
+                _DR(name=r.name, status=r.status, still_needed=r.still_needed)
+                for r in academic_state.requirements
+            ],
+            completed_courses=list(academic_state.completed_all),
+        )
 
     gaps = analyze_gaps(audit)
     if not gaps:
@@ -232,7 +251,11 @@ async def recommend_courses_async(
         )
 
     # Build redundancy checker — filters completed/superseded/saturated courses
-    checker = RedundancyChecker.from_audit(audit)
+    checker = (
+        RedundancyChecker.from_state(academic_state)
+        if academic_state is not None
+        else RedundancyChecker.from_audit(audit)
+    )
 
     # Filter out requirements effectively satisfied by completed courses
     gaps = checker.effective_gaps(gaps)

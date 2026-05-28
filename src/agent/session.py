@@ -1,7 +1,13 @@
 """Agent session: caches personal data loaded at chat start, tracks history."""
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from src.mypcc.parser import CourseInfo, DegreeAudit, DegreeRequirement, PersonalContext, ScheduledCourse
+
+if TYPE_CHECKING:
+    from src.academic.academic_state import AcademicState
 
 _MAX_HISTORY = 20  # 10 turns
 
@@ -10,6 +16,7 @@ _MAX_HISTORY = 20  # 10 turns
 class AgentSession:
     personal_context: PersonalContext = field(default_factory=PersonalContext)
     degree_audit: DegreeAudit = field(default_factory=DegreeAudit)
+    academic_state: "AcademicState | None" = field(default=None)
     schedule: list[ScheduledCourse] = field(default_factory=list)
     enrolled_times: dict[str, str] = field(default_factory=dict)  # CRN → "Tu/Th 9:30–11:50 AM"
     history: list[dict] = field(default_factory=list)

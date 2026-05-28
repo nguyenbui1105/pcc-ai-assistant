@@ -350,6 +350,7 @@ async def _tool_recommend_courses(
         term=term or None,
         profile_hints=profile_hints,
         is_f1=session.is_international,
+        academic_state=session.academic_state,
     )
 
 
@@ -366,6 +367,7 @@ async def _tool_build_schedule(
         term=term,
         is_international=session.is_international,
         extra_excluded=excluded_courses or [],
+        academic_state=session.academic_state,
     )
 
 

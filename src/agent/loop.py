@@ -56,6 +56,10 @@ def _build_messages(question: str, session: AgentSession) -> list[dict]:
     else:
         system += "\nCONTEXT: Real student data loaded from MyPCC and GRAD Plan."
 
+    # Inject canonical academic state — prevents LLM from recomputing requirements
+    if session.academic_state is not None:
+        system += session.academic_state.to_llm_context()
+
     messages: list[dict] = [{"role": "system", "content": system}]
     messages.extend(session.history[-_MAX_HISTORY:])
     prefix = "/no_think\n" if settings.llm_provider == "ollama" else ""

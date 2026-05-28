@@ -380,6 +380,7 @@ async def plan_schedule_async(
     term: str | None = None,
     is_international: bool = False,
     extra_excluded: list[str] | None = None,
+    academic_state=None,  # AcademicState | None — canonical source of truth
 ) -> str:
     """Full pipeline: parse prefs → fetch schedule → optimize → format."""
     if term is None:
@@ -432,9 +433,15 @@ async def plan_schedule_async(
             "The schedule may not be posted yet — try again later."
         )
 
-    completed = _extract_completed_from_audit(audit)
+    # Use academic_state.completed_all (completed + in_progress) when available.
+    # This prevents recommending courses the student is currently enrolled in.
+    if academic_state is not None:
+        completed = list(academic_state.completed_all)
+    else:
+        completed = _extract_completed_from_audit(audit)
     if extra_excluded:
-        normalized = {c.upper().replace(" ", "") for c in extra_excluded}
+        from src.schedule.prereq_map import normalize_code as _nc
+        normalized = {_nc(c) for c in extra_excluded}
         completed = list(set(completed) | normalized)
 
     # Build redundancy checker — used to sink completed/superseded courses in the sort

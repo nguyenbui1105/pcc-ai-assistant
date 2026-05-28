@@ -80,6 +80,23 @@ async def _load_real_session() -> tuple[AgentSession | None, str]:
         except Exception as e:
             logger.warning(f"Could not fetch enrolled times: {e}")
 
+        # Build canonical AcademicState — single source of truth for all planning
+        try:
+            from src.academic.academic_state import AcademicState
+            session.academic_state = AcademicState.from_session(
+                audit=session.degree_audit,
+                current_courses=ctx.courses,
+                is_f1=session.is_international,
+            )
+            logger.info(
+                f"AcademicState built: "
+                f"{len(session.academic_state.completed)} completed, "
+                f"{len(session.academic_state.in_progress)} in-progress, "
+                f"{len(session.academic_state.remaining_reqs)} remaining reqs"
+            )
+        except Exception as e:
+            logger.warning(f"Could not build AcademicState: {e}")
+
         logger.info(f"Real session loaded for: {session.student_name}")
         return session, gradplan_warning
 

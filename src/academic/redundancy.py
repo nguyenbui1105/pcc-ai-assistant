@@ -75,6 +75,53 @@ class RedundancyChecker:
     _prereq_superseded: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
+    def from_state(cls, state: "AcademicState") -> "RedundancyChecker":  # type: ignore[name-defined]
+        """Build from canonical AcademicState — preferred over from_audit."""
+        # Temporarily import here to avoid circular imports at module level
+        from src.academic.academic_state import AcademicState  # noqa: F401
+        # Build a minimal audit-like structure from the state
+        raw_completed = list(state.completed_all)
+        completed_norm = frozenset(state.completed_all)
+
+        subject_levels: dict[str, list[int]] = defaultdict(list)
+        for code in completed_norm:
+            subj = _course_subject(code)
+            num = _course_number(code)
+            if subj and num:
+                subject_levels[subj].append(num)
+        for levels in subject_levels.values():
+            levels.sort()
+
+        saturated = set(state.complete_req_names)
+
+        for req_name, subjects in AAOT_SUBJECT_MAP.items():
+            if req_name in saturated:
+                continue
+            courses_in_req = [c for c in completed_norm if _course_subject(c) in subjects]
+            if not courses_in_req:
+                continue
+            if req_name in _SINGLE_COURSE_REQS:
+                saturated.add(req_name)
+            elif req_name in _MULTI_DISCIPLINE_REQS:
+                distinct = {_course_subject(c) for c in courses_in_req}
+                if len(distinct) >= _MULTI_DISCIPLINE_REQS[req_name]:
+                    saturated.add(req_name)
+
+        try:
+            prereq_superseded = frozenset(
+                normalize_code(c) for c in get_superseded_courses(raw_completed)
+            )
+        except Exception:
+            prereq_superseded = frozenset()
+
+        return cls(
+            completed_norm=completed_norm,
+            subject_levels=dict(subject_levels),
+            saturated_reqs=frozenset(saturated),
+            _prereq_superseded=prereq_superseded,
+        )
+
+    @classmethod
     def from_audit(cls, audit: DegreeAudit) -> "RedundancyChecker":
         """Build a checker from a degree audit."""
         raw_completed = list(audit.completed_courses or [])
