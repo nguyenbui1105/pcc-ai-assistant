@@ -1,0 +1,55 @@
+# === Secrets & Credentials ===
+.env
+data/mypcc_cookies.json
+data/gradplan_cookies.json
+data/banss_cookies.json
+data/password.json
+
+# === Generated / Runtime Data ===
+data/query_logs.jsonl
+data/sessions/
+data/chromadb/
+data/__pycache__/
+
+# === Logs ===
+*.log
+chainlit.log
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.venv/
+venv/
+env/
+ENV/
+.Python
+
+# === Testing ===
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+coverage.xml
+
+# === IDE ===
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# === OS ===
+.DS_Store
+Thumbs.db
+
+# === Chainlit ===
+.files/
+.chainlit/translations/
+
+# === Claude Code ===
+.claude/

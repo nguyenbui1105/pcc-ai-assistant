@@ -1,0 +1,73 @@
+# LiteLLM Proxy Config — PCC-RAG multi-provider routing
+# Start proxy: python scripts/start_proxy.py
+# Docs: https://docs.litellm.ai/docs/proxy/configs
+
+model_list:
+
+  # ── ACTIVE NOW ────────────────────────────────────────────────────────────
+
+  # Groq cloud (fast, free tier available)
+  - model_name: groq
+    litellm_params:
+      model: groq/qwen/qwen3-32b
+      api_key: os.environ/GROQ_API_KEY
+
+  # Local Ollama (always available, no internet needed)
+  - model_name: ollama
+    litellm_params:
+      model: ollama/qwen3:4b
+      api_base: os.environ/OLLAMA_BASE_URL
+
+  # ── ACTIVATE WHEN KEY IS READY ────────────────────────────────────────────
+  # Steps:
+  #   1. Uncomment the model block below
+  #   2. Add the API key to .env
+  #   3. Update NINE_ROUTER_MODEL in .env to the new model name
+  #   4. Update router_settings.fallbacks to include the new model
+
+  # OpenAI — ChatGPT (gpt-4o, gpt-4.5-preview, o4-mini, ...)
+  # - model_name: chatgpt
+  #   litellm_params:
+  #     model: openai/gpt-4o          # or gpt-4.5-preview / o4-mini
+  #     api_key: os.environ/OPENAI_API_KEY
+
+  # xAI — Grok-3
+  # - model_name: grok
+  #   litellm_params:
+  #     model: xai/grok-3             # or xai/grok-3-mini
+  #     api_key: os.environ/XAI_API_KEY
+
+  # DeepSeek
+  # - model_name: deepseek
+  #   litellm_params:
+  #     model: deepseek/deepseek-chat  # or deepseek/deepseek-reasoner
+  #     api_key: os.environ/DEEPSEEK_API_KEY
+
+  # Anthropic — Claude (direct, without 9Router)
+  # - model_name: claude
+  #   litellm_params:
+  #     model: claude-opus-4-6
+  #     api_key: os.environ/ANTHROPIC_API_KEY
+
+router_settings:
+  # Routing strategy: try primary → auto-fallback on error/timeout
+  #
+  # CURRENT chain:   groq → ollama
+  # FULL chain (when all keys added):
+  #   chatgpt → grok → deepseek → groq → ollama
+  #
+  # To update: add new model names to the list below (highest priority first)
+  fallbacks:
+    - { groq: [ollama] }
+  # Uncomment progressively as models are activated:
+  # - { chatgpt: [grok, deepseek, groq, ollama] }
+  # - { grok: [deepseek, groq, ollama] }
+  # - { deepseek: [groq, ollama] }
+
+  num_retries: 1
+  timeout: 30
+  retry_after: 0
+
+general_settings:
+  master_key: sk-pcc-rag   # used as NINE_ROUTER_API_KEY in .env
+  port: 4000
