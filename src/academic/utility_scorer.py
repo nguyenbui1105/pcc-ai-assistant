@@ -37,6 +37,7 @@ def score_course(
     course_code: str,
     profile: StudentProfile,
     gap_is_high_priority: bool = False,
+    redundancy_penalty: float = 0.0,
 ) -> tuple[float, list[str]]:
     """Compute utility score for a course code given a student profile.
 
@@ -46,12 +47,16 @@ def score_course(
     reasons: list[str] = []
 
     # ── Penalties first — these dominate ────────────────────────────────────
+    if redundancy_penalty >= 0.99:
+        return 0.02, ["already completed or superseded"]
+
     if meta.is_filler:
-        return 0.12, ["low strategic value"]
+        score = 0.12 * (1.0 - redundancy_penalty)
+        return max(0.01, score), ["low strategic value"]
+
     if meta.is_wellness:
-        # Wellness courses satisfy graduation requirements but carry low
-        # transfer or career value — don't recommend them proactively
-        return 0.25, ["wellness / PE course (satisfies graduation req)"]
+        score = 0.25 * (1.0 - redundancy_penalty)
+        return max(0.02, score), ["wellness / PE course (satisfies graduation req)"]
 
     # ── Component scores ─────────────────────────────────────────────────────
     base = meta.base_utility
@@ -98,6 +103,8 @@ def score_course(
         + 0.05 * workload_safety
         + req_boost
     )
+    # Apply redundancy penalty (0.0 = no penalty, 0.7 = 70% reduction)
+    raw *= (1.0 - redundancy_penalty)
     score = max(0.0, min(1.0, raw))
 
     # Add tag-based reason if nothing else generated one
@@ -126,17 +133,28 @@ def sort_sections_by_utility(
     sections: list[CourseSection],
     profile: StudentProfile,
     high_priority_codes: set[str] | None = None,
+    checker=None,  # Optional[RedundancyChecker]
 ) -> list[CourseSection]:
     """Sort a flat list of sections from most to least strategically valuable.
 
     This is the key function called by the schedule planner before the
     greedy optimizer — ensures high-utility courses are picked first.
+    Redundant/completed courses sink to the bottom of the list.
     """
     hp = high_priority_codes or set()
-    scored = [
-        score_section(s, profile, gap_is_high_priority=(s.course_code in hp))
-        for s in sections
-    ]
+    scored = []
+    for s in sections:
+        rp = checker.redundancy_penalty(s.course_code) if checker else 0.0
+        ss = ScoredSection(
+            section=s,
+            score=score_course(
+                s.course_code,
+                profile,
+                gap_is_high_priority=(s.course_code in hp),
+                redundancy_penalty=rp,
+            )[0],
+        )
+        scored.append(ss)
     scored.sort(reverse=True)
     return [ss.section for ss in scored]
 

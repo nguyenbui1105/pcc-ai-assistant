@@ -15,6 +15,7 @@ from collections import defaultdict
 from loguru import logger
 
 from src.academic.course_knowledge import get_course_metadata
+from src.academic.redundancy import RedundancyChecker
 from src.academic.student_model import StudentProfile, enrich_profile_from_text, infer_profile
 from src.academic.utility_scorer import is_high_priority_gap, rank_courses_for_display, score_course
 from src.mypcc.parser import DegreeAudit
@@ -33,11 +34,17 @@ _MIN_SCORE_THRESHOLD = 0.28
 
 
 def _is_completed(course_code: str, completed: set[str]) -> bool:
-    code = course_code.upper().replace(" ", "")
+    """Check if a course is completed. Uses normalized codes to handle MTH065 ↔ MTH65."""
+    from src.schedule.prereq_map import normalize_code
+    code = normalize_code(course_code)
     if code in completed:
         return True
+    # Also check with normalized completed set
+    completed_norm = {normalize_code(c) for c in completed}
+    if code in completed_norm:
+        return True
     base = re.sub(r"[A-Z]$", "", code)
-    return base in completed
+    return base in completed_norm
 
 
 def _select_courses_for_fetch(
@@ -87,6 +94,7 @@ def _format_gap_block(
     section_map: dict[str, list[CourseSection]],
     completed: set[str],
     profile: StudentProfile,
+    checker: "RedundancyChecker | None" = None,
 ) -> str:
     """Format one requirement block with utility-ranked courses + WHY explanations."""
     high_priority = is_high_priority_gap(gap.label, profile)
@@ -98,10 +106,22 @@ def _format_gap_block(
 
     lines: list[str] = [header]
 
-    # Collect all available courses for this gap
+    # Determine which subjects still need courses (handles multi-discipline reqs)
+    active_subjects = (
+        checker.filter_redundant_subjects(gap)
+        if checker else gap.subjects
+    )
+    if not active_subjects:
+        lines.append("  _Requirements already satisfied by completed courses._")
+        return "\n".join(lines)
+
+    # Collect available courses — only from subjects still needed
     candidate_courses: list[CourseInfo] = []
-    for subj in gap.subjects:
+    for subj in active_subjects:
         for course in subject_courses.get(subj, []):
+            # Skip if directly completed or superseded by higher-level course
+            if checker and checker.is_redundant(course.course_code):
+                continue
             if not _is_completed(course.course_code, completed):
                 candidate_courses.append(course)
 
@@ -211,6 +231,18 @@ async def recommend_courses_async(
             f"specific subjects directly."
         )
 
+    # Build redundancy checker — filters completed/superseded/saturated courses
+    checker = RedundancyChecker.from_audit(audit)
+
+    # Filter out requirements effectively satisfied by completed courses
+    gaps = checker.effective_gaps(gaps)
+    if not gaps:
+        return (
+            "Your AAOT requirements appear to be effectively satisfied by your "
+            "completed courses — congratulations! Confirm at "
+            "[GRAD Plan](https://gradplan.pcc.edu)."
+        )
+
     # Sort gaps: HIGH-PRIORITY first, then alphabetical by label
     def _gap_sort_key(g: SubjectGap) -> tuple[int, str]:
         hp = 0 if is_high_priority_gap(g.label, profile) else 1
@@ -255,7 +287,7 @@ async def recommend_courses_async(
 
     completed_set = set(audit.completed_courses)
     for gap in gaps_sorted:
-        lines.append(_format_gap_block(gap, subject_courses, section_map, completed_set, profile))
+        lines.append(_format_gap_block(gap, subject_courses, section_map, completed_set, profile, checker))
         lines.append("")
 
     lines.append("---")

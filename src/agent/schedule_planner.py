@@ -14,6 +14,7 @@ import asyncio
 from loguru import logger
 
 from src.academic.constraint_validator import has_hard_violations, validate_plan
+from src.academic.redundancy import RedundancyChecker
 from src.academic.student_model import enrich_profile_from_text, infer_profile
 from src.academic.utility_scorer import is_high_priority_gap, sort_sections_by_utility
 from src.mypcc.parser import DegreeAudit
@@ -132,9 +133,10 @@ def _attempt_build(
     profile,
     subject_cap: int,
     high_priority_codes: set[str],
+    checker: RedundancyChecker | None = None,
 ) -> SchedulePlan | None:
-    """Sort by utility, optionally cap subjects, then run the greedy optimizer."""
-    sorted_secs = sort_sections_by_utility(sections, profile, high_priority_codes)
+    """Sort by utility (with redundancy penalty), optionally cap subjects, then optimize."""
+    sorted_secs = sort_sections_by_utility(sections, profile, high_priority_codes, checker)
     if subject_cap > 0:
         sorted_secs = _cap_subjects_by_code(sorted_secs, cap=subject_cap)
     return build_schedule(sorted_secs, prefs, completed)
@@ -146,6 +148,7 @@ def _build_with_repair(
     completed: list[str],
     profile,
     high_priority_codes: set[str],
+    checker: RedundancyChecker | None = None,
 ) -> tuple[SchedulePlan | None, list[str]]:
     """Iterative planning loop: generate → validate → repair → repeat.
 
@@ -168,7 +171,7 @@ def _build_with_repair(
 
     for cap, rd, rt, rm, note in STAGES:
         stage_prefs = _relax_prefs(prefs, relax_days=rd, relax_time=rt, relax_mode=rm)
-        plan = _attempt_build(sections, stage_prefs, completed, profile, cap, high_priority_codes)
+        plan = _attempt_build(sections, stage_prefs, completed, profile, cap, high_priority_codes, checker)
 
         if plan and plan.sections:
             # Validate against the ORIGINAL (strict) prefs — hard constraints only
@@ -434,6 +437,9 @@ async def plan_schedule_async(
         normalized = {c.upper().replace(" ", "") for c in extra_excluded}
         completed = list(set(completed) | normalized)
 
+    # Build redundancy checker — used to sink completed/superseded courses in the sort
+    checker = RedundancyChecker.from_audit(audit)
+
     # Build high-priority set for utility scorer
     high_priority_codes = {
         s.course_code for s in all_sections
@@ -448,7 +454,7 @@ async def plan_schedule_async(
     # soft constraints until hard constraints (F-1 minimums, no conflicts) are met.
     logger.info("Running planning loop with constraint repair...")
     plan, repair_notes = _build_with_repair(
-        all_sections, prefs, completed, profile, high_priority_codes
+        all_sections, prefs, completed, profile, high_priority_codes, checker
     )
     logger.info(
         f"Planning result: {plan.total_credits if plan else 0}cr, "
