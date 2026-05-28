@@ -55,6 +55,32 @@ TOOL_DEFS: list[dict] = [
     {
         "type": "function",
         "function": {
+            "name": "recommend_courses",
+            "description": (
+                "Recommend the most strategically valuable courses for the student's degree gaps, "
+                "ranked by utility: transfer value, STEM/CS alignment, prerequisite unlock potential. "
+                "Use for 'what should I take?', 'recommend courses', 'what do I still need?'. "
+                "Returns courses with WHY explanations. Smarter than find_courses for planning."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "term": {
+                        "type": "string",
+                        "description": "Term key: summer2026, fall2026, spring2027. Omit for current term.",
+                    },
+                    "profile_hints": {
+                        "type": "string",
+                        "description": "Student goals / context, e.g. 'planning to transfer to PSU, CS major, F-1 student'",
+                    },
+                },
+                "required": [],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "find_courses",
             "description": (
                 "Search live PCC schedule for available courses by subject code(s). "
@@ -101,6 +127,11 @@ TOOL_DEFS: list[dict] = [
                     "term": {
                         "type": "string",
                         "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
+                    },
+                    "excluded_courses": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Course codes to exclude (e.g. ['COMM100']) when the student says they already took a course not yet in their audit.",
                     },
                 },
                 "required": ["preferences"],
@@ -308,13 +339,33 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
     return "\n".join(lines)
 
 
-async def _tool_build_schedule(preferences: str, term: str, session: AgentSession) -> str:
+async def _tool_recommend_courses(
+    term: str,
+    profile_hints: str,
+    session: AgentSession,
+) -> str:
+    from src.agent.course_recommender import recommend_courses_async
+    return await recommend_courses_async(
+        session.degree_audit,
+        term=term or None,
+        profile_hints=profile_hints,
+        is_f1=session.is_international,
+    )
+
+
+async def _tool_build_schedule(
+    preferences: str,
+    term: str,
+    session: AgentSession,
+    excluded_courses: list[str] | None = None,
+) -> str:
     from src.agent.schedule_planner import plan_schedule_async
     return await plan_schedule_async(
         session.degree_audit,
         preferences,
         term=term,
         is_international=session.is_international,
+        extra_excluded=excluded_courses or [],
     )
 
 
@@ -444,6 +495,12 @@ async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
                 return _tool_get_degree_progress(session)
             case "get_my_finances":
                 return _tool_get_my_finances(session)
+            case "recommend_courses":
+                return await _tool_recommend_courses(
+                    args.get("term", ""),
+                    args.get("profile_hints", ""),
+                    session,
+                )
             case "find_courses":
                 return await _tool_find_courses(
                     args.get("subjects", []),
@@ -455,6 +512,7 @@ async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
                     args.get("preferences", ""),
                     args.get("term") or get_current_term(),
                     session,
+                    excluded_courses=args.get("excluded_courses"),
                 )
             case "search_pcc":
                 return await _tool_search_pcc(args.get("query", ""))

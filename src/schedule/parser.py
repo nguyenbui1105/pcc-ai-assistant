@@ -68,9 +68,13 @@ class CourseSection:
         if self.instructor:
             parts.append(self.instructor)
         if self.seats_available >= 0 and self.seats_total > 0:
-            parts.append(f"{self.seats_available}/{self.seats_total} open")
-            if self.waitlist_total > 0:
-                parts.append(f"waitlist {self.waitlist_available}/{self.waitlist_total}")
+            parts.append(f"{self.seats_available}/{self.seats_total} seats open")
+            # Only show waitlist when class is full or someone is already on it
+            if self.waitlist_total > 0 and (
+                self.seats_available == 0 or self.waitlist_available < self.waitlist_total
+            ):
+                taken = self.waitlist_total - self.waitlist_available
+                parts.append(f"waitlist {taken}/{self.waitlist_total}")
         else:
             parts.append("Open" if self.seats > 0 else "Full")
         if self.fees:

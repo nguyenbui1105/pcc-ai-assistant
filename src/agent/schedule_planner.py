@@ -3,6 +3,8 @@ import asyncio
 
 from loguru import logger
 
+from src.academic.student_model import infer_profile, enrich_profile_from_text
+from src.academic.utility_scorer import sort_sections_by_utility, is_high_priority_gap
 from src.mypcc.parser import DegreeAudit
 from src.schedule.fetcher import TERM_LABELS, fetch_capacity_async, fetch_details_async, fetch_listings_async, get_current_term
 from src.schedule.gap_analyzer import analyze_gaps, get_unique_subjects, course_to_requirement
@@ -16,7 +18,7 @@ from src.schedule.optimizer import (
 from src.schedule.parser import CourseInfo, CourseSection, parse_detail_html, parse_listing_html
 from src.schedule.prereq_map import PREREQS
 
-_MAX_COURSES_PER_SUBJECT = 4
+_MAX_COURSES_PER_SUBJECT = 6
 
 _INTL_NOTICE = """\
 > **F-1 International Student:** You must enroll in **at least 12 credits**, \
@@ -72,8 +74,13 @@ def _extract_completed_from_audit(audit: DegreeAudit) -> list[str]:
     return list(audit.completed_courses)
 
 
-async def _collect_sections(audit: DegreeAudit, term: str) -> list[CourseSection]:
-    """Fetch all candidate sections for the student's incomplete requirements."""
+async def _collect_sections(
+    audit: DegreeAudit, term: str, profile=None
+) -> list[CourseSection]:
+    """Fetch candidate sections, selecting courses by utility score not just course number."""
+    from src.academic.utility_scorer import score_course as _score_course
+    import re as _re
+
     gaps = analyze_gaps(audit)
     subjects = get_unique_subjects(gaps)
 
@@ -82,10 +89,18 @@ async def _collect_sections(audit: DegreeAudit, term: str) -> list[CourseSection
     subject_courses: dict[str, list[CourseInfo]] = {}
     for subj in subjects:
         courses = parse_listing_html(listing_html.get(subj, ""), subj)
-        courses_sorted = sorted(
-            courses,
-            key=lambda c: int(__import__("re").search(r"\d+", c.course_code).group() or 999),  # type: ignore
-        )
+        if profile is not None:
+            # Sort by utility score (highest first) so we fetch the most valuable courses
+            def _key(c: CourseInfo) -> float:
+                s, _ = _score_course(c.course_code, profile)
+                return -s
+            courses_sorted = sorted(courses, key=_key)
+        else:
+            # Fallback: lowest course number first
+            def _num_key(c: CourseInfo) -> int:
+                m = _re.search(r"\d+", c.course_code)
+                return int(m.group()) if m else 999
+            courses_sorted = sorted(courses, key=_num_key)
         subject_courses[subj] = courses_sorted[:_MAX_COURSES_PER_SUBJECT]
 
     to_fetch = [c for courses in subject_courses.values() for c in courses]
@@ -187,11 +202,15 @@ def _format_plan(
         if sec.instructor:
             detail_parts.append(f"👨‍🏫 {sec.instructor}")
         if sec.seats_available >= 0 and sec.seats_total > 0:
-            detail_parts.append(f"🪑 {sec.seats_available}/{sec.seats_total} open")
+            detail_parts.append(f"🪑 {sec.seats_available}/{sec.seats_total} seats open")
         elif sec.seats == 0:
             detail_parts.append("⛔ Full")
-        if sec.waitlist_total > 0:
-            detail_parts.append(f"waitlist {sec.waitlist_available}/{sec.waitlist_total}")
+        # Only show waitlist when class is full or someone is actually on it
+        if sec.waitlist_total > 0 and (
+            sec.seats_available == 0 or sec.waitlist_available < sec.waitlist_total
+        ):
+            taken = sec.waitlist_total - sec.waitlist_available
+            detail_parts.append(f"waitlist {taken}/{sec.waitlist_total}")
         if sec.fees:
             detail_parts.append(f"fees {sec.fees}")
         lines.append("  " + " | ".join(detail_parts))
@@ -231,6 +250,7 @@ async def plan_schedule_async(
     prefs_text: str,
     term: str | None = None,
     is_international: bool = False,
+    extra_excluded: list[str] | None = None,
 ) -> str:
     """Full pipeline: parse prefs → fetch schedule → optimize → format."""
     if term is None:
@@ -246,6 +266,14 @@ async def plan_schedule_async(
     logger.info(
         f"Planning schedule: {prefs.credit_target}cr, mode={prefs.mode}, "
         f"blocked={prefs.blocked_days}, intl={prefs.is_international}"
+    )
+
+    # Build student profile for utility-aware section selection
+    profile = infer_profile(audit, is_f1=is_international)
+    profile = enrich_profile_from_text(profile, prefs_text)
+    logger.info(
+        f"Student profile: major={profile.major_interest}, "
+        f"stem={profile.stem_affinity:.2f}, transfer={profile.transfer_priority:.2f}"
     )
 
     gaps = analyze_gaps(audit)
@@ -266,7 +294,7 @@ async def plan_schedule_async(
             f"specific subjects directly."
         )
 
-    all_sections = await _collect_sections(audit, term)
+    all_sections = await _collect_sections(audit, term, profile=profile)
     logger.info(f"Collected {len(all_sections)} candidate sections")
 
     if not all_sections:
@@ -276,7 +304,23 @@ async def plan_schedule_async(
         )
 
     completed = _extract_completed_from_audit(audit)
-    plan = build_schedule(all_sections, prefs, completed)
+    if extra_excluded:
+        normalized = {c.upper().replace(" ", "") for c in extra_excluded}
+        completed = list(set(completed) | normalized)
+
+    # Sort sections by utility score BEFORE the greedy optimizer.
+    # This ensures high-value courses (lab sciences, CS, MTH) are picked first
+    # instead of whatever subject happens to appear first in the gaps list.
+    high_priority_codes = {
+        s.course_code for s in all_sections
+        if any(is_high_priority_gap(g.label, profile) and s.course_code.startswith(tuple(g.subjects))
+               for g in gaps)
+    }
+    all_sections_sorted = sort_sections_by_utility(
+        all_sections, profile, high_priority_codes=high_priority_codes
+    )
+
+    plan = build_schedule(all_sections_sorted, prefs, completed)
 
     if not plan or not plan.sections:
         msg = (
