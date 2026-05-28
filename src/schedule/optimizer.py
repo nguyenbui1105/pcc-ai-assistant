@@ -276,10 +276,11 @@ def build_schedule(
     if prefs.is_international:
         inperson_pool = [s for s in ok_pool if s.section_type != "Online"]
         online_pool   = [s for s in ok_pool if s.section_type == "Online"]
-        # Fill at least 9 in-person credits first
-        best = _greedy_pick(inperson_pool, 9)
+        # Fill in-person: target the 9cr minimum but allow up to credit_target+2
+        # so 4cr courses aren't skipped when we're at 8cr (old bug: max was 9+2=11).
+        best = _greedy_pick(inperson_pool, 9, max_credits=prefs.credit_target + 2)
         if best is None:
-            best = _greedy_pick(inperson_pool, prefs.credit_target)
+            best = _greedy_pick(inperson_pool, prefs.credit_target, max_credits=prefs.credit_target + 2)
         # Top up to credit_target with online if needed.
         # Pass credit_target (not gap) as absolute total target for _greedy_pick.
         if best is not None and best.total_credits < prefs.credit_target:
@@ -328,16 +329,24 @@ def _greedy_pick(
     pool: list[CourseSection],
     target: int,
     existing: list[CourseSection] | None = None,
+    max_credits: int | None = None,
 ) -> SchedulePlan | None:
-    """Pick non-conflicting sections summing close to target credits."""
+    """Pick non-conflicting sections summing close to target credits.
+
+    max_credits overrides the default (target + 2) overshoot guard.
+    Use max_credits=prefs.credit_target+2 in the F-1 in-person fill phase
+    so 4cr courses aren't dropped when we need exactly 9cr in-person
+    but are already at 8cr (8+4=12 would be blocked by the old 9+2=11 guard).
+    """
     selected: list[CourseSection] = list(existing or [])
     total = sum(section_credits(s) for s in selected)
+    ceiling = max_credits if max_credits is not None else target + 2
 
     for sec in pool:
         if total >= target:
             break
         cr = section_credits(sec)
-        if total + cr > target + 2:
+        if total + cr > ceiling:
             continue
         # Conflict check against already selected
         if any(sections_conflict(sec, s) for s in selected):

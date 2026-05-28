@@ -1,10 +1,21 @@
-"""Interactive schedule planner: asks preferences → builds conflict-free schedule."""
+"""Interactive schedule planner: asks preferences → builds conflict-free schedule.
+
+Planning pipeline:
+  1. Fetch candidate sections for all degree gaps
+  2. Sort by utility score (STEM / transfer / CS alignment)
+  3. Cap subjects to ensure diversity (prevents picking 3 PHY before any BI/SOC)
+  4. Run greedy optimizer → SchedulePlan
+  5. Validate against hard constraints (F-1 minimums, conflicts)
+  6. If violations found: repair via progressive constraint relaxation loop
+  7. Format and return (with repair notes if constraints were relaxed)
+"""
 import asyncio
 
 from loguru import logger
 
-from src.academic.student_model import infer_profile, enrich_profile_from_text
-from src.academic.utility_scorer import sort_sections_by_utility, is_high_priority_gap
+from src.academic.constraint_validator import has_hard_violations, validate_plan
+from src.academic.student_model import enrich_profile_from_text, infer_profile
+from src.academic.utility_scorer import is_high_priority_gap, sort_sections_by_utility
 from src.mypcc.parser import DegreeAudit
 from src.schedule.fetcher import TERM_LABELS, fetch_capacity_async, fetch_details_async, fetch_listings_async, get_current_term
 from src.schedule.gap_analyzer import analyze_gaps, get_unique_subjects, course_to_requirement
@@ -97,6 +108,88 @@ def _cap_subjects_by_code(
     return result
 
 
+def _relax_prefs(
+    prefs: SchedulePrefs,
+    relax_days: bool = False,
+    relax_time: bool = False,
+    relax_mode: bool = False,
+) -> SchedulePrefs:
+    """Return a copy of prefs with selected soft constraints relaxed."""
+    return SchedulePrefs(
+        credit_target=prefs.credit_target,
+        mode="any" if relax_mode else prefs.mode,
+        blocked_days=set() if relax_days else set(prefs.blocked_days),
+        earliest_hour=0 if relax_time else prefs.earliest_hour,
+        latest_hour=1440 if relax_time else prefs.latest_hour,
+        is_international=prefs.is_international,
+    )
+
+
+def _attempt_build(
+    sections: list[CourseSection],
+    prefs: SchedulePrefs,
+    completed: list[str],
+    profile,
+    subject_cap: int,
+    high_priority_codes: set[str],
+) -> SchedulePlan | None:
+    """Sort by utility, optionally cap subjects, then run the greedy optimizer."""
+    sorted_secs = sort_sections_by_utility(sections, profile, high_priority_codes)
+    if subject_cap > 0:
+        sorted_secs = _cap_subjects_by_code(sorted_secs, cap=subject_cap)
+    return build_schedule(sorted_secs, prefs, completed)
+
+
+def _build_with_repair(
+    sections: list[CourseSection],
+    prefs: SchedulePrefs,
+    completed: list[str],
+    profile,
+    high_priority_codes: set[str],
+) -> tuple[SchedulePlan | None, list[str]]:
+    """Iterative planning loop: generate → validate → repair → repeat.
+
+    Tries progressively relaxed constraint stages until a hard-constraint-valid
+    plan is found, or all stages are exhausted.
+
+    Returns (best_plan, repair_notes) — plan may still have soft violations.
+    """
+    # Each stage: (subject_cap, relax_days, relax_time, relax_mode, description)
+    STAGES = [
+        (3, False, False, False, None),
+        (6, False, False, False, "expanded course pool to find more options"),
+        (6, True,  False, False, "relaxed day preferences to meet credit minimum"),
+        (6, True,  True,  False, "relaxed time window to meet credit minimum"),
+        (0, True,  True,  True,  "used any available open section (emergency fill)"),
+    ]
+
+    best_plan: SchedulePlan | None = None
+    repair_notes: list[str] = []
+
+    for cap, rd, rt, rm, note in STAGES:
+        stage_prefs = _relax_prefs(prefs, relax_days=rd, relax_time=rt, relax_mode=rm)
+        plan = _attempt_build(sections, stage_prefs, completed, profile, cap, high_priority_codes)
+
+        if plan and plan.sections:
+            # Validate against the ORIGINAL (strict) prefs — hard constraints only
+            if not has_hard_violations(plan, prefs):
+                if note:
+                    repair_notes.append(note)
+                return plan, repair_notes
+            # Keep track of best partial plan seen
+            if best_plan is None or plan.total_credits > best_plan.total_credits:
+                best_plan = plan
+            logger.info(
+                f"Stage {cap}/{rd}/{rt}/{rm}: {plan.total_credits}cr — "
+                f"hard violations remain, trying next stage"
+            )
+
+    # All stages exhausted — return best partial plan with warning
+    if note:
+        repair_notes.append("⚠️ Could not fully satisfy F-1 credit requirements — manual adjustment may be needed.")
+    return best_plan, repair_notes
+
+
 async def _collect_sections(
     audit: DegreeAudit, term: str, profile=None
 ) -> list[CourseSection]:
@@ -172,6 +265,7 @@ def _format_plan(
     prefs: SchedulePrefs,
     term_label: str,
     gaps: list,
+    repair_notes: list[str] | None = None,
 ) -> str:
     """Format the schedule plan as readable markdown."""
     inperson_cr = _inperson_credits(plan.sections)
@@ -189,18 +283,27 @@ def _format_plan(
         f"({inperson_cr} in-person · {online_cr} online)",
     ]
 
-    # International compliance check
+    # Repair notes (explain what the system did to achieve a valid plan)
+    if repair_notes:
+        lines.append("")
+        for note in repair_notes:
+            if note.startswith("⚠️"):
+                lines.append(note)
+            else:
+                lines.append(f"_ℹ️ Auto-repair: {note}_")
+
+    # International compliance status
     if prefs.is_international:
+        lines.append("")
         if plan.total_credits < 12 or inperson_cr < 9:
-            lines.append("")
             lines.append(
                 f"⚠️ **F-1 compliance issue:** {plan.total_credits} credits total "
                 f"({inperson_cr} in-person). Minimum: 12 total / 9 in-person. "
-                f"Please consult ISS before enrolling."
+                f"Please consult your ISS advisor before enrolling."
             )
         else:
             lines.append(
-                f"  ✅ *Meets F-1 requirement: ≥12 credits, ≥9 in-person*"
+                f"✅ *Meets F-1 requirement: ≥12 credits, ≥9 in-person*"
             )
 
     lines += ["", "---", ""]
@@ -331,39 +434,39 @@ async def plan_schedule_async(
         normalized = {c.upper().replace(" ", "") for c in extra_excluded}
         completed = list(set(completed) | normalized)
 
-    # Sort sections by utility score BEFORE the greedy optimizer.
-    # This ensures high-value courses (lab sciences, CS, MTH) are picked first
-    # instead of whatever subject happens to appear first in the gaps list.
+    # Build high-priority set for utility scorer
     high_priority_codes = {
         s.course_code for s in all_sections
-        if any(is_high_priority_gap(g.label, profile) and s.course_code.startswith(tuple(g.subjects))
-               for g in gaps)
+        if any(
+            is_high_priority_gap(g.label, profile) and s.course_code.startswith(tuple(g.subjects))
+            for g in gaps
+        )
     }
-    all_sections_sorted = sort_sections_by_utility(
-        all_sections, profile, high_priority_codes=high_priority_codes
-    )
-    # Cap at 3 distinct courses per subject so the optimizer encounters
-    # diverse subjects early (prevents picking 3 PHY before any BI/SOC).
-    all_sections_sorted = _cap_subjects_by_code(all_sections_sorted, cap=3)
-    logger.debug(f"Candidate pool after subject-cap: {len(all_sections_sorted)} sections")
 
-    plan = build_schedule(all_sections_sorted, prefs, completed)
+    # Run planning loop with automatic repair.
+    # Starts strict (cap=3 subjects, all prefs), then progressively relaxes
+    # soft constraints until hard constraints (F-1 minimums, no conflicts) are met.
+    logger.info("Running planning loop with constraint repair...")
+    plan, repair_notes = _build_with_repair(
+        all_sections, prefs, completed, profile, high_priority_codes
+    )
+    logger.info(
+        f"Planning result: {plan.total_credits if plan else 0}cr, "
+        f"repair stages: {len(repair_notes)}"
+    )
 
     if not plan or not plan.sections:
-        msg = (
-            f"Could not find a conflict-free combination matching your preferences."
+        hint = (
+            " As an F-1 student, you need ≥12 credits with ≥9 in-person."
+            if is_international else ""
         )
-        if is_international:
-            msg += (
-                " As an F-1 student, you need ≥12 credits with ≥9 in-person — "
-                "try removing day/time restrictions."
-            )
-        else:
-            msg += " Try relaxing constraints (e.g., allow more days, fewer blocked times)."
-        return msg
+        return (
+            f"Could not find a conflict-free schedule matching your preferences.{hint} "
+            f"Try relaxing constraints or requesting a different term."
+        )
 
     gaps = analyze_gaps(audit)
-    return _format_plan(plan, prefs, term_label, gaps)
+    return _format_plan(plan, prefs, term_label, gaps, repair_notes=repair_notes)
 
 
 def plan_schedule(
