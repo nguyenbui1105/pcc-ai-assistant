@@ -12,7 +12,7 @@ from loguru import logger
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mock", action="store_true", help="Use mock degree audit instead of real cookies")
-parser.add_argument("--term", default="summer2026", help="Term to check (default: summer2026)")
+parser.add_argument("--term", default=None, help="Term to check (default: current term)")
 parser.add_argument("--subject", help="Test single subject HTML parsing only (e.g. BI)")
 args = parser.parse_args()
 
@@ -73,8 +73,11 @@ else:
 
 # Run the recommender
 from src.agent.course_recommender import recommend_courses
+from src.schedule.fetcher import get_current_term
 
+term = args.term or get_current_term()
+print(f"Term: {term}")
 print("\n" + "=" * 60)
-result = recommend_courses(audit, term=args.term)
+result = recommend_courses(audit, term=term)
 print(result)
 print("=" * 60)

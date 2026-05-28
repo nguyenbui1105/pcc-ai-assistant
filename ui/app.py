@@ -7,7 +7,13 @@ from loguru import logger
 
 from src.agent.loop import agent_stream
 from src.agent.session import AgentSession, create_demo_session
-from src.mypcc.fetcher import fetch_degree_audit_async, fetch_personal_context_async, fetch_banss_schedule_async, fetch_enrolled_times_async
+from src.mypcc.fetcher import (
+    fetch_degree_audit_async,
+    fetch_personal_context_async,
+    fetch_banss_schedule_async,
+    fetch_enrolled_times_async,
+    SessionExpiredError,
+)
 from src.mypcc.parser import parse, parse_degree_audit, parse_banss_events, _course_id_to_code
 from src.schedule.fetcher import TERM_CODES, TERM_LABELS
 from src.agent.query_logger import QueryLogger
@@ -29,13 +35,18 @@ _TOOL_LABELS = {
 }
 
 
-async def _load_real_session() -> AgentSession | None:
-    """Try to load personal data from cookies. Returns None if cookies are expired/missing."""
+async def _load_real_session() -> tuple[AgentSession | None, str]:
+    """Try to load personal data from cookies.
+
+    Returns (session, reason) where:
+    - session is None on failure; reason explains why (for the UI)
+    - reason is "" on full success, or "gradplan-expired" if only GRAD Plan failed
+    """
     try:
         pages = await fetch_personal_context_async(_COOKIES_PATH)
         ctx = parse(pages)
         if not ctx.has_meaningful_data():
-            return None
+            return None, "expired"
 
         session = AgentSession(
             personal_context=ctx,
@@ -43,6 +54,7 @@ async def _load_real_session() -> AgentSession | None:
             is_international=ctx.is_international,
         )
 
+        gradplan_warning = ""
         try:
             audit_text = await fetch_degree_audit_async(_GRADPLAN_COOKIES_PATH)
             ctx.degree_audit = parse_degree_audit(audit_text)
@@ -55,6 +67,9 @@ async def _load_real_session() -> AgentSession | None:
                 f"GRAD Plan loaded: {session.degree_audit.credits_applied}/"
                 f"{session.degree_audit.credits_required} credits"
             )
+        except SessionExpiredError:
+            gradplan_warning = "gradplan-expired"
+            logger.warning("GRAD Plan JWT expired — degree audit unavailable")
         except Exception as e:
             logger.warning(f"GRAD Plan unavailable: {e}")
 
@@ -66,38 +81,63 @@ async def _load_real_session() -> AgentSession | None:
             logger.warning(f"Could not fetch enrolled times: {e}")
 
         logger.info(f"Real session loaded for: {session.student_name}")
-        return session
+        return session, gradplan_warning
 
+    except FileNotFoundError:
+        logger.warning("MyPCC cookies file not found")
+        return None, "missing"
     except Exception as e:
         logger.warning(f"Could not load real session: {e}")
-        return None
+        return None, "error"
+
+
+_DEMO_REASON_MESSAGES: dict[str, str] = {
+    "missing": (
+        "> **Cookies not found.** Run `python scripts/setup_session.py` to log in to MyPCC "
+        "and save your session. Until then, the assistant runs with a sample student profile."
+    ),
+    "expired": (
+        "> **Session expired.** Your MyPCC cookies are no longer valid. "
+        "Run `python scripts/setup_session.py` to refresh your session."
+    ),
+    "error": (
+        "> **Could not load your PCC session.** "
+        "Run `python scripts/setup_session.py` to set up your cookies."
+    ),
+}
+
+_GRADPLAN_EXPIRED_NOTE = (
+    "\n\n> **Note:** Your GRAD Plan session has expired — degree audit is unavailable. "
+    "Run `python scripts/setup_session.py` to refresh (GRAD Plan JWT expires every ~7 days)."
+)
 
 
 @cl.on_chat_start
 async def on_start():
-    session = await _load_real_session()
+    session, reason = await _load_real_session()
 
     if session is not None:
-        # Real student data loaded successfully
+        # Real student data loaded successfully (possibly without GRAD Plan)
         cl.user_session.set("agent_session", session)
         name_part = f", {session.student_name}" if session.student_name else ""
-        await cl.Message(
-            content=(
-                f"Hi{name_part}! I'm your PCC Assistant.\n\n"
-                "I have access to your **MyPCC data** — ask me about your courses, "
-                "balance, degree progress, or what to register for next."
-            )
-        ).send()
+        body = (
+            f"Hi{name_part}! I'm your PCC Assistant.\n\n"
+            "I have access to your **MyPCC data** — ask me about your courses, "
+            "balance, degree progress, or what to register for next."
+        )
+        if reason == "gradplan-expired":
+            body += _GRADPLAN_EXPIRED_NOTE
+        await cl.Message(content=body).send()
     else:
         # Cookies missing or expired → load demo mode
         session = create_demo_session()
         cl.user_session.set("agent_session", session)
-        logger.info("Demo mode activated (no valid cookies found)")
+        logger.info(f"Demo mode activated: {reason}")
+        reason_note = _DEMO_REASON_MESSAGES.get(reason, _DEMO_REASON_MESSAGES["error"])
         await cl.Message(
             content=(
-                "Hi Alex! I'm your PCC Assistant — running in **Demo Mode**.\n\n"
-                "> This demo uses a sample student profile so anyone can explore the assistant. "
-                "To use your real PCC data, run `python scripts/setup_session.py` to log in.\n\n"
+                "Hi! I'm your PCC Assistant — running in **Demo Mode**.\n\n"
+                f"{reason_note}\n\n"
                 "Try asking:\n"
                 "- *What courses am I taking this term?*\n"
                 "- *What do I still need to graduate?*\n"

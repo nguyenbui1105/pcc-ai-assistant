@@ -1,8 +1,11 @@
-"""Ollama LLM provider — streaming throughout, simpler message format."""
+"""Ollama LLM provider — buffers content until tool decision is known, then yields word-by-word."""
+import re
 from typing import AsyncIterator
 
 from loguru import logger
 from ollama import AsyncClient, Message
+
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 from src.agent.providers.base import LLMProvider
 from src.agent.session import AgentSession
@@ -41,7 +44,6 @@ class OllamaProvider(LLMProvider):
                 content = chunk.message.content or ""
                 if content:
                     collected_content += content
-                    yield content
                 if chunk.done:
                     final_message = chunk.message
 
@@ -51,8 +53,11 @@ class OllamaProvider(LLMProvider):
 
             tool_calls = final_message.tool_calls
             if not tool_calls:
-                if "<think>" in collected_content:
-                    logger.debug("Thinking tags leaked — consider enabling /no_think")
+                # No tool call — strip think tags and yield word-by-word
+                clean = _THINK_RE.sub("", collected_content).strip()
+                words = clean.split(" ")
+                for i, word in enumerate(words):
+                    yield word + (" " if i < len(words) - 1 else "")
                 return
 
             messages.append(final_message)

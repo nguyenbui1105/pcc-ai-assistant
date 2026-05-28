@@ -112,9 +112,13 @@ def _format_gap_block(
     return "\n".join(lines)
 
 
+def _is_aaot_degree(degree: str) -> bool:
+    return any(kw in degree.upper() for kw in ["AAOT", "OREGON TRANSFER", "ASSOCIATE OF ARTS OREGON"])
+
+
 async def recommend_courses_async(
     audit: DegreeAudit,
-    term: str = "summer2026",
+    term: str | None = None,
 ) -> str:
     if not audit.degree:
         return (
@@ -122,12 +126,25 @@ async def recommend_courses_async(
             "Please re-run `scripts/setup_session.py` to refresh your session cookies."
         )
 
+    if term is None:
+        from src.schedule.fetcher import get_current_term
+        term = get_current_term()
+
     gaps = analyze_gaps(audit)
     if not gaps:
+        if _is_aaot_degree(audit.degree):
+            return (
+                "Your degree audit shows all AAOT requirements are **complete** — "
+                "congratulations! Double-check at "
+                "[GRAD Plan](https://gradplan.pcc.edu) for final confirmation."
+            )
         return (
-            f"Your degree audit shows all tracked requirements are **complete** — "
-            f"congratulations! Double-check at "
-            f"[GRAD Plan](https://gradplan.pcc.edu) for final confirmation."
+            f"Automatic course recommendations work best for AAOT degrees. "
+            f"Your degree (**{audit.degree}**) may not be fully supported.\n\n"
+            f"**Known progress:** {audit.credits_applied}/{audit.credits_required} credits "
+            f"| GPA {audit.gpa}\n\n"
+            f"Please consult your advisor, or use **find_courses** to search for "
+            f"specific subjects directly."
         )
 
     subjects = get_unique_subjects(gaps)
@@ -169,5 +186,5 @@ async def recommend_courses_async(
     return "\n".join(lines)
 
 
-def recommend_courses(audit: DegreeAudit, term: str = "summer2026") -> str:
+def recommend_courses(audit: DegreeAudit, term: str | None = None) -> str:
     return asyncio.run(recommend_courses_async(audit, term))

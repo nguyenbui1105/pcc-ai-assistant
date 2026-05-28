@@ -122,8 +122,26 @@ pytest tests/ -v --cov=src --cov-report=term-missing
 
 ## Deploy to Render
 
-A `render.yaml` is included for one-click deployment to Render.com (free tier).  
+A `render.yaml` is included for deployment to Render.com.  
 Set `GROQ_API_KEY` manually in the Render dashboard — do not commit it.
+
+### Deployment Notes
+
+| Feature | Free tier | Paid tier / self-hosted |
+|---|---|---|
+| Chat UI | Works | Works |
+| PCC search & schedule | Works | Works |
+| MyPCC personal data | **Demo mode only** | Requires persistent disk + cookies |
+| GRAD Plan degree audit | **Demo mode only** | Requires persistent disk + cookies |
+
+**Why personal data doesn't work on free tier:**
+1. Playwright requires browser binaries (~300 MB) not available on Render free tier by default.
+2. Cookie files (`data/*.json`) are gitignored and not present on the server.
+
+**To enable personal data:**
+- Use a paid Render instance with a **persistent disk** mounted at `/data/`.
+- Copy your cookie files there after running `scripts/setup_session.py` locally.
+- Or self-host with Docker — `playwright install chromium --with-deps` is already in `buildCommand`.
 
 ## Known Limitations
 

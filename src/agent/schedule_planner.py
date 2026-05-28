@@ -4,7 +4,7 @@ import asyncio
 from loguru import logger
 
 from src.mypcc.parser import DegreeAudit
-from src.schedule.fetcher import TERM_LABELS, fetch_capacity_async, fetch_details_async, fetch_listings_async
+from src.schedule.fetcher import TERM_LABELS, fetch_capacity_async, fetch_details_async, fetch_listings_async, get_current_term
 from src.schedule.gap_analyzer import analyze_gaps, get_unique_subjects, course_to_requirement
 from src.schedule.optimizer import (
     SchedulePrefs,
@@ -61,6 +61,10 @@ PLANNER_PROMPT = PLANNER_PROMPT_DOMESTIC
 
 def get_planner_prompt(is_international: bool) -> str:
     return PLANNER_PROMPT_INTERNATIONAL if is_international else PLANNER_PROMPT_DOMESTIC
+
+
+def _is_aaot_degree(degree: str) -> bool:
+    return any(kw in degree.upper() for kw in ["AAOT", "OREGON TRANSFER", "ASSOCIATE OF ARTS OREGON"])
 
 
 def _extract_completed_from_audit(audit: DegreeAudit) -> list[str]:
@@ -225,10 +229,12 @@ def _format_plan(
 async def plan_schedule_async(
     audit: DegreeAudit,
     prefs_text: str,
-    term: str = "summer2026",
+    term: str | None = None,
     is_international: bool = False,
 ) -> str:
     """Full pipeline: parse prefs → fetch schedule → optimize → format."""
+    if term is None:
+        term = get_current_term()
     if not audit.degree:
         return (
             "I couldn't load your degree audit. "
@@ -241,6 +247,24 @@ async def plan_schedule_async(
         f"Planning schedule: {prefs.credit_target}cr, mode={prefs.mode}, "
         f"blocked={prefs.blocked_days}, intl={prefs.is_international}"
     )
+
+    gaps = analyze_gaps(audit)
+    if not gaps:
+        if _is_aaot_degree(audit.degree):
+            return (
+                "Your degree audit shows all AAOT requirements are **complete** — "
+                "no gaps to fill. Consult your advisor if you need electives or "
+                "want to confirm graduation requirements at "
+                "[GRAD Plan](https://gradplan.pcc.edu)."
+            )
+        return (
+            f"Automatic schedule building works best for AAOT degrees. "
+            f"Your degree (**{audit.degree}**) may not be fully supported.\n\n"
+            f"**Known progress:** {audit.credits_applied}/{audit.credits_required} credits "
+            f"| GPA {audit.gpa}\n\n"
+            f"Please consult your advisor, or use **Find Courses** to search for "
+            f"specific subjects directly."
+        )
 
     all_sections = await _collect_sections(audit, term)
     logger.info(f"Collected {len(all_sections)} candidate sections")
@@ -274,7 +298,7 @@ async def plan_schedule_async(
 def plan_schedule(
     audit: DegreeAudit,
     prefs_text: str,
-    term: str = "summer2026",
+    term: str | None = None,
     is_international: bool = False,
 ) -> str:
     return asyncio.run(plan_schedule_async(audit, prefs_text, term, is_international))

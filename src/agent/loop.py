@@ -6,7 +6,7 @@ from loguru import logger
 from src.agent.providers.groq_provider import GroqProvider
 from src.agent.providers.nine_router_provider import NineRouterProvider
 from src.agent.providers.ollama_provider import OllamaProvider
-from src.agent.session import AgentSession
+from src.agent.session import AgentSession, _MAX_HISTORY
 from src.config import settings
 
 _MAX_ITER = 6
@@ -55,7 +55,7 @@ def _build_messages(question: str, session: AgentSession) -> list[dict]:
         system += "\nCONTEXT: Real student data loaded from MyPCC and GRAD Plan."
 
     messages: list[dict] = [{"role": "system", "content": system}]
-    messages.extend(session.history[-10:])
+    messages.extend(session.history[-_MAX_HISTORY:])
     prefix = "/no_think\n" if settings.llm_provider == "ollama" else ""
     messages.append({"role": "user", "content": f"{prefix}{question}"})
     return messages

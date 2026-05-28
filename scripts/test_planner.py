@@ -14,7 +14,7 @@ assert s1 == {"WR115"}, f"expected {{WR115}}, got {s1}"
 print("WR121 supersedes WR115: OK")
 
 s3 = get_superseded_courses(["MTH112"])
-assert "MTH111" in s3 and "MTH095" in s3 and "MTH065" in s3
+assert "MTH111" in s3 and "MTH95" in s3 and "MTH65" in s3
 print(f"MTH112 transitive supersede {sorted(s3)}: OK")
 
 s4 = get_superseded_courses(["WR122"])

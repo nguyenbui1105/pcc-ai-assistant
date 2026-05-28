@@ -1,6 +1,7 @@
 """Fetch PCC class schedule pages — listing and course detail."""
 import asyncio
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import httpx
 from loguru import logger
@@ -119,6 +120,24 @@ async def fetch_capacity_async(
     except Exception as e:
         logger.error(f"Capacity API failed: {e}")
         return {}
+
+
+def get_current_term() -> str:
+    """Return the current/upcoming term key based on today's date.
+
+    Jan–Mar → spring<year>, Apr–Jul → summer<year>, Aug–Dec → fall<year>.
+    Falls back to the last known term key if the computed key is not in TERM_CODES.
+    """
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    if month <= 3:
+        key = f"spring{year}"
+    elif month <= 7:
+        key = f"summer{year}"
+    else:
+        key = f"fall{year}"
+    return key if key in TERM_CODES else list(TERM_CODES.keys())[-1]
 
 
 def fetch_listings(subjects: list[str], term: str = "summer2026") -> dict[str, str]:

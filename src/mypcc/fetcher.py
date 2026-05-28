@@ -11,6 +11,15 @@ if TYPE_CHECKING:
 from playwright.async_api import async_playwright
 from loguru import logger
 
+from src.schedule.fetcher import TERM_LABELS, TERM_NAMES
+
+# Reverse map: "Summer 2026" → "summer2026"
+_TERM_LABEL_TO_KEY: dict[str, str] = {v: k for k, v in TERM_LABELS.items()}
+
+
+class SessionExpiredError(Exception):
+    """Raised when a fetched page has too little content — session/cookie has expired."""
+
 COOKIES_PATH = "./data/mypcc_cookies.json"
 GRADPLAN_COOKIES_PATH = "./data/gradplan_cookies.json"
 BANSS_COOKIES_PATH = "./data/banss_cookies.json"
@@ -99,7 +108,13 @@ async def _fetch_degree_audit_async(cookies_path: str) -> str:
             if len(text) > 200:
                 logger.success(f"Got {len(text)} chars from degree_audit")
                 return text
-            logger.warning("degree_audit: content too short — re-run setup_session.py")
+            logger.warning("degree_audit: content too short — session likely expired")
+            raise SessionExpiredError(
+                "GRAD Plan content too short — JWT may be expired. "
+                "Re-run `scripts/setup_session.py` to refresh."
+            )
+        except SessionExpiredError:
+            raise
         except Exception as e:
             logger.error(f"degree_audit: {e}")
         finally:
@@ -183,13 +198,13 @@ async def fetch_enrolled_times_async(
     Returns a dict mapping CRN → formatted schedule string, e.g. "Tu/Th 9:30–11:50 AM".
     """
     import httpx
-    from src.schedule.fetcher import TERM_NAMES
     from src.schedule.parser import parse_detail_html
 
-    term_slug = TERM_NAMES.get(
-        next((k for k, v in __import__("src.schedule.fetcher", fromlist=["TERM_LABELS"]).TERM_LABELS.items() if v == term_name), ""),
-        "spring",
-    )
+    term_key = _TERM_LABEL_TO_KEY.get(term_name, "")
+    if not term_key:
+        logger.warning(f"fetch_enrolled_times_async: unknown term label {term_name!r} — skipping")
+        return {}
+    term_slug = TERM_NAMES.get(term_key, "")
     base = "https://www.pcc.edu/schedule"
     results: dict[str, str] = {}
 

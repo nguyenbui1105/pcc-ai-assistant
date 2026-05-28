@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from loguru import logger
 
 from src.agent.session import AgentSession
+from src.schedule.fetcher import get_current_term
 from src.schedule.prereq_map import PREREQS
 
 # ── Tool definitions (Ollama/OpenAI format) ───────────────────────────────────
@@ -71,8 +72,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027",
-                        "default": "summer2026",
+                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
                     },
                 },
                 "required": ["subjects"],
@@ -100,8 +100,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027",
-                        "default": "summer2026",
+                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
                     },
                 },
                 "required": ["preferences"],
@@ -448,13 +447,13 @@ async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
             case "find_courses":
                 return await _tool_find_courses(
                     args.get("subjects", []),
-                    args.get("term", "summer2026"),
+                    args.get("term") or get_current_term(),
                     session,
                 )
             case "build_schedule":
                 return await _tool_build_schedule(
                     args.get("preferences", ""),
-                    args.get("term", "summer2026"),
+                    args.get("term") or get_current_term(),
                     session,
                 )
             case "search_pcc":

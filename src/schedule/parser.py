@@ -186,9 +186,13 @@ def _detail_bs4(soup, course_code: str, title: str) -> list[CourseSection]:  # t
     page_credits = ""
     credits_p = soup.find("p", class_="credits")
     if credits_p:
-        m = re.search(r"Credits?:\s*(\d+(?:\.\d+)?)", credits_p.get_text(), re.I)
-        if m:
-            page_credits = m.group(1)
+        credits_text = credits_p.get_text()
+        if "variable" in credits_text.lower():
+            page_credits = ""  # variable-credit courses: don't lock in a number
+        else:
+            m = re.search(r"Credits?:\s*(\d+(?:\.\d+)?)", credits_text, re.I)
+            if m:
+                page_credits = m.group(1)
 
     # data-rows with a numeric 5-digit data-crn (skip continuation rows with data-crn="and")
     for row in soup.find_all("tr", attrs={"data-crn": _CRN_DIGIT_RE}):

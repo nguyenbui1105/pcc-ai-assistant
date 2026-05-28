@@ -4,6 +4,9 @@ sys.path.insert(0, ".")
 from loguru import logger
 logger.remove()
 
+from src.schedule.fetcher import get_current_term
+_TERM = get_current_term()
+
 from src.mypcc.parser import DegreeAudit, DegreeRequirement
 from src.agent.schedule_planner import plan_schedule_async
 
@@ -17,7 +20,7 @@ async def run(label, audit, prefs, is_international=False):
     print(f"Completed: {audit.completed_courses}")
     print(SEP)
     result = await plan_schedule_async(
-        audit, prefs, term="summer2026", is_international=is_international
+        audit, prefs, term=_TERM, is_international=is_international
     )
     print(result)
 
