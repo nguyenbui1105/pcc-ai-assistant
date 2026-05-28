@@ -74,6 +74,29 @@ def _extract_completed_from_audit(audit: DegreeAudit) -> list[str]:
     return list(audit.completed_courses)
 
 
+def _cap_subjects_by_code(
+    sections: list[CourseSection], cap: int = 3
+) -> list[CourseSection]:
+    """Keep sections for at most `cap` distinct course codes per subject prefix.
+
+    Prevents the greedy optimizer from filling all credits with PHY courses
+    (e.g., PHY201+PHY121+PHY100) before reaching BI/CH/SOC candidates.
+    Sections for already-seen course codes are always kept (no CRN lost).
+    """
+    import re as _re
+    from collections import defaultdict
+    code_sets: dict[str, set[str]] = defaultdict(set)
+    result: list[CourseSection] = []
+    for sec in sections:
+        m = _re.match(r"^([A-Z]+)", sec.course_code)
+        subj = m.group(1) if m else "OTHER"
+        # Allow if: this subject still has room OR this course_code already counted
+        if len(code_sets[subj]) < cap or sec.course_code in code_sets[subj]:
+            code_sets[subj].add(sec.course_code)
+            result.append(sec)
+    return result
+
+
 async def _collect_sections(
     audit: DegreeAudit, term: str, profile=None
 ) -> list[CourseSection]:
@@ -319,6 +342,10 @@ async def plan_schedule_async(
     all_sections_sorted = sort_sections_by_utility(
         all_sections, profile, high_priority_codes=high_priority_codes
     )
+    # Cap at 3 distinct courses per subject so the optimizer encounters
+    # diverse subjects early (prevents picking 3 PHY before any BI/SOC).
+    all_sections_sorted = _cap_subjects_by_code(all_sections_sorted, cap=3)
+    logger.debug(f"Candidate pool after subject-cap: {len(all_sections_sorted)} sections")
 
     plan = build_schedule(all_sections_sorted, prefs, completed)
 

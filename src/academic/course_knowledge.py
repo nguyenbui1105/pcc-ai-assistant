@@ -228,10 +228,11 @@ _SUBJECT_DEFAULTS: dict[str, tuple[float, float, float, float, set[str]]] = {
 _SUPPORT_LAB_PATTERN = re.compile(
     r"""
     (?:
-        ^WR\d+[LX]\d*$           |  # WR121L, WR115X support labs
-        ^[A-Z]+\d+[XZ]$          |  # PE100X, PE120X activity variants
-        ^MTH\d+[HBZ]$            |  # MTH65H bridge courses
-        ^WR115$                      # always a support course
+        ^WR\d+[LXBCZ]\d*$        |  # WR199B, WR121L, WR115X, WR121Z support labs
+        ^[A-Z]+\d+[XZ]\d*$       |  # PE100X, PE120Z activity variants
+        ^MTH\d+[HBZ]$            |  # MTH65H bridge/support courses
+        ^WR115$                   |  # developmental writing (always support)
+        ^WR1[3-9]\d[A-Z]?$          # WR130-199 = developmental/support writing range
     )
     """,
     re.VERBOSE,
