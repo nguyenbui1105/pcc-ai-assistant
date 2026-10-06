@@ -237,7 +237,7 @@ class TestGroqProvider:
             new_callable=AsyncMock,
             return_value="ok",
         ) as mock_exec:
-            tokens = await collect(provider, make_messages(), make_session())
+            await collect(provider, make_messages(), make_session())
 
         # execute_tool called with empty dict, not crashed
         mock_exec.assert_called_once()

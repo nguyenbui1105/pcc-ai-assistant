@@ -1,7 +1,7 @@
 """Map DegreeAudit incomplete requirements to PCC subject codes."""
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from src.mypcc.parser import DegreeAudit, DegreeRequirement
+from src.mypcc.parser import DegreeAudit
 
 # Maps tracked requirement names (from parser.py) to PCC subject codes.
 # Order within each list = recommendation priority.

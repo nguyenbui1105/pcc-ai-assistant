@@ -10,11 +10,9 @@ Pipeline:
 """
 import asyncio
 import re
-from collections import defaultdict
 
 from loguru import logger
 
-from src.academic.course_knowledge import get_course_metadata
 from src.academic.redundancy import RedundancyChecker
 from src.academic.student_model import StudentProfile, enrich_profile_from_text, infer_profile
 from src.academic.utility_scorer import is_high_priority_gap, rank_courses_for_display, score_course
@@ -106,14 +104,11 @@ def _format_gap_block(
 
     lines: list[str] = [header]
 
-    # Determine which subjects still need courses (handles multi-discipline reqs)
+    # Prefer disciplines the student hasn't covered yet (multi-discipline reqs)
     active_subjects = (
         checker.filter_redundant_subjects(gap)
         if checker else gap.subjects
     )
-    if not active_subjects:
-        lines.append("  _Requirements already satisfied by completed courses._")
-        return "\n".join(lines)
 
     # Collect available courses — only from subjects still needed
     candidate_courses: list[CourseInfo] = []
@@ -139,7 +134,6 @@ def _format_gap_block(
         above = ranked  # fallback: show something
 
     courses_shown = 0
-    has_low_score_suppressed = False
 
     for course_code, utility_score, reasons in above:
         if courses_shown >= _MAX_COURSES_SHOWN:
@@ -250,21 +244,12 @@ async def recommend_courses_async(
             f"specific subjects directly."
         )
 
-    # Build redundancy checker — filters completed/superseded/saturated courses
+    # Build redundancy checker — filters completed/superseded courses
     checker = (
         RedundancyChecker.from_state(academic_state)
         if academic_state is not None
         else RedundancyChecker.from_audit(audit)
     )
-
-    # Filter out requirements effectively satisfied by completed courses
-    gaps = checker.effective_gaps(gaps)
-    if not gaps:
-        return (
-            "Your AAOT requirements appear to be effectively satisfied by your "
-            "completed courses — congratulations! Confirm at "
-            "[GRAD Plan](https://gradplan.pcc.edu)."
-        )
 
     # Sort gaps: HIGH-PRIORITY first, then alphabetical by label
     def _gap_sort_key(g: SubjectGap) -> tuple[int, str]:

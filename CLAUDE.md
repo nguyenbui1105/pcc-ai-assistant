@@ -9,7 +9,7 @@ Chainlit chat assistant for Portland Community College (PCC) students, tuned for
 ## Commands
 
 ```bash
-pip install -r requirements.txt          # also needs `openai` (imported by the 9Router provider, not listed in requirements.txt)
+pip install -r requirements.txt
 cp .env.example .env                     # then set GROQ_API_KEY
 
 chainlit run ui/app.py                   # http://localhost:8000
@@ -48,19 +48,19 @@ ui/app.py (Chainlit) ── on_chat_start: load real session from cookies, else 
 
 Fallback happens **only when a provider raises**. A Groq 429 yields a "rate-limited" message and returns without falling back. Groq and 9Router make **non-streaming** calls for tool decisions (streamed tool-call parsing was unreliable with llama models), then emit the final text word by word. Ollama streams and strips `<think>` tags.
 
-Each provider file has its own copy of the iteration loop and of `_PASSTHROUGH_TOOLS = {"build_schedule", "get_my_courses"}`. Output from these tools goes **straight to the user** and the turn ends without another LLM call. To change tool-loop behavior, edit all three providers.
+`PASSTHROUGH_TOOLS = {"build_schedule", "get_my_courses"}` (in `providers/base.py`): output from these tools goes **straight to the user** and the turn ends without another LLM call. `THINK_RE` and `iter_words` live in `base.py` too, but each provider has its own copy of the iteration loop, so a change to tool-loop behavior means editing all three providers.
 
 ### Tool protocol
 - Providers yield a `\x00tool:<name>\x00` sentinel before each tool runs. `ui/app.py` intercepts it to relabel the step and never renders it.
-- **Adding or renaming a tool** means updating four places: the `TOOL_DEFS` entry and the `execute_tool()` match case in `src/agent/tools.py`, the TOOLS/RULES list in `_SYSTEM` in `src/agent/loop.py`, and `_TOOL_LABELS` in `ui/app.py`. `recommend_courses` currently has no label, so the UI shows "Using recommend_courses...".
+- **Adding or renaming a tool** means updating four places: the `TOOL_DEFS` entry and the `execute_tool()` match case in `src/agent/tools.py`, the TOOLS/RULES list in `_SYSTEM` in `src/agent/loop.py`, and `_TOOL_LABELS` in `ui/app.py`.
 - Tools return plain strings. `execute_tool` catches exceptions and returns an error string, so a failing tool never breaks the loop.
 
 ### Session (`src/agent/session.py`)
-`AgentSession` holds `personal_context`, `degree_audit`, `academic_state`, `enrolled_times` (CRN → meeting time), and `history`. History keeps the last 20 messages, and stored assistant replies are cut to 800 chars. `create_demo_session()` builds the "Alex" AAOT/F-1 student and leaves `academic_state` as `None`, so the demo exercises the audit-only code paths. The demo flag changes the system prompt to tell the LLM to label personal data as demo data.
+`AgentSession` holds `personal_context`, `degree_audit`, `academic_state`, `enrolled_times` (CRN → meeting time), and `history`. History keeps the last 20 messages, and stored assistant replies are cut to 800 chars. `create_demo_session()` builds the "Alex" AAOT/F-1 student, including an `AcademicState`, so the demo runs the same planning paths as a real session. Its current term follows `get_current_term()`. The demo flag changes the system prompt to tell the LLM to label personal data as demo data. The system prompt also states today's date and the default term.
 
 ### Academic planning layer (`src/academic/`)
-- `AcademicState` (`academic_state.py`) is the **canonical** degree state. It is built once in `ui/app.py` after the GRAD Plan audit loads and is injected into every system prompt as "AUTHORITATIVE — DO NOT RECOMPUTE". Its `completed_all` set is completed ∪ in-progress. When `academic_state` is present, the planner and recommender use it instead of re-deriving from the audit.
-- `redundancy.RedundancyChecker`: drops courses that are completed, superseded (a higher-numbered course in the same subject is done), or saturated (the requirement is effectively met).
+- `AcademicState` (`academic_state.py`) is the **canonical** degree state. It is built once per session, after the GRAD Plan audit loads in `ui/app.py` or in `create_demo_session()`, and is injected into every system prompt as "AUTHORITATIVE — DO NOT RECOMPUTE". Its `completed_all` set is completed ∪ in-progress. Requirement status is normalized to `complete | in_progress | incomplete`; the GRAD Plan parser emits `in-progress` with a hyphen. When `academic_state` is present, the planner and recommender use it instead of re-deriving from the audit.
+- `redundancy.RedundancyChecker`: drops courses that are completed, or superseded (a higher-numbered course in the same subject is done). It never decides on its own that a requirement is met. GRAD Plan is authoritative for that: inferring it from completed courses double-counts them across requirements. For Social Sciences and the lab requirements, it prefers subjects the student hasn't covered yet.
 - `student_model.infer_profile()` + `enrich_profile_from_text()` → `StudentProfile` (STEM/CS affinity, transfer target, F-1)
 - `course_knowledge.COURSE_KB` + `utility_scorer`: weighted utility score per course. Filler, support-lab and wellness courses are heavily penalized.
 - `constraint_validator.validate_plan()`: hard constraints are F-1 ≥12 credits total, ≥9 in person, and no time conflicts
@@ -76,15 +76,15 @@ The repair loop relaxes soft constraints in this order: subject cap 3 → 6 → 
 - **Policy search** (`search_pcc`): DuckDuckGo (`ddgs`) `site:pcc.edu`, then fetches the top page. When results are empty it falls back to `_PCC_TOPIC_URLS`.
 
 ## Cross-file invariants
-- **Term keys** (`summer2026`, `fall2026`, ...) are hardcoded in `TERM_CODES`, `TERM_NAMES`, and `TERM_LABELS` in `src/schedule/fetcher.py`. Add each new term to all three. `get_current_term()` falls back to the last key when the computed term is missing.
+- **Term keys** (`<season><year>`, e.g. `winter2027`) map to PCC codes `<year><01|02|03|04>` for winter/spring/summer/fall. `TERM_CODES`, `TERM_NAMES`, and `TERM_LABELS` in `src/schedule/fetcher.py` are generated at import time for last year through next year. Pass user- or LLM-supplied terms through `resolve_term()`: it normalizes input such as `"Fall 2026"`, maps an empty value to `get_current_term()`, and raises `ValueError` for an unknown term instead of silently fetching another one. `get_current_term()` maps Jan–Mar to spring, Apr–Jul to summer, and Aug–Dec to fall, so it never returns a winter term.
 - **Requirement names** from the GRAD Plan parser (`"Composition"`, `"Lab Requirement 2"`, ...) are dict keys in `gap_analyzer.AAOT_SUBJECT_MAP`/`REQ_LABELS`, `academic_state._REQ_DESCRIPTIONS`, and `redundancy._SINGLE_COURSE_REQS`/`_MULTI_DISCIPLINE_REQS`. Rename them everywhere at once. Only AAOT is mapped, so other degrees produce no gaps.
 - **Course codes** are compared in normalized form. `prereq_map.normalize_code()` strips leading zeros (`MTH065` → `MTH65`). MyPCC course IDs look like `WR-122-12345` (subject-number-CRN).
 
-## Legacy / stale code
-- `src/mypcc/router.py`: a regex query classifier. The agent loop doesn't use it, but `tests/test_router.py` still tests it.
+## Legacy / stale code (don't extend; candidates for deletion)
+- `src/mypcc/router.py`: a regex query classifier. The agent loop doesn't use it, but `tests/test_router.py` and `scripts/test_router.py` still exercise it.
 - `src/llm/ollama_llm.py` (only `scripts/test_llm.py` uses it). `scripts/test_query.py` and `scripts/crawl.py` import modules that no longer exist (`src.pipeline`, `src.crawler`).
-- `litellm_config.yaml` + `scripts/start_proxy.py` run a LiteLLM proxy on port 4000. The `nine_router` provider defaults to 9Router on port 20128 instead (`scripts/start_9router.py`).
-- `.env.example` sets an outdated `GROQ_MODEL`. The code default and `render.yaml` use `llama-3.3-70b-versatile`.
+- `litellm_config.yaml` + `scripts/start_proxy.py` run a LiteLLM proxy on port 4000. The `nine_router` provider talks to 9Router on port 20128 instead (`scripts/start_9router.py`).
+- The BANSS path is unused: `fetch_banss_schedule_async`, `parse_banss_events`, `ScheduledCourse` and `AgentSession.schedule` exist, and `setup_session.py` still saves `banss_cookies.json`, but enrolled meeting times come from the public schedule.
 
 ## Deployment
 `render.yaml` deploys the Chainlit app to Render. Cookie files are gitignored, so a deployed instance runs in demo mode unless the cookies are placed on a persistent disk.

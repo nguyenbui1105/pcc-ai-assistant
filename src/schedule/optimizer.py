@@ -1,7 +1,6 @@
 """Schedule optimizer: conflict detection, prereq filter, credit targeting."""
 import re
 from dataclasses import dataclass, field
-from itertools import combinations
 
 from src.schedule.parser import CourseSection
 

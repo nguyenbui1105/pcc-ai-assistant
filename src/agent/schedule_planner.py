@@ -13,7 +13,7 @@ import asyncio
 
 from loguru import logger
 
-from src.academic.constraint_validator import has_hard_violations, validate_plan
+from src.academic.constraint_validator import has_hard_violations
 from src.academic.redundancy import RedundancyChecker
 from src.academic.student_model import enrich_profile_from_text, infer_profile
 from src.academic.utility_scorer import is_high_priority_gap, sort_sections_by_utility
@@ -28,7 +28,6 @@ from src.schedule.optimizer import (
     section_credits,
 )
 from src.schedule.parser import CourseInfo, CourseSection, parse_detail_html, parse_listing_html
-from src.schedule.prereq_map import PREREQS
 
 _MAX_COURSES_PER_SUBJECT = 6
 
@@ -306,7 +305,7 @@ def _format_plan(
             )
         else:
             lines.append(
-                f"✅ *Meets F-1 requirement: ≥12 credits, ≥9 in-person*"
+                "✅ *Meets F-1 requirement: ≥12 credits, ≥9 in-person*"
             )
 
     lines += ["", "---", ""]

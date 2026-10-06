@@ -2,17 +2,20 @@
 Tool definitions and executor for the PCC agent.
 Each tool wraps existing src/* functions and returns a plain string for the LLM.
 """
-import json
 import re
-from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
 from src.agent.session import AgentSession
-from src.schedule.fetcher import get_current_term
+from src.schedule.fetcher import TERM_CODES, resolve_term
 from src.schedule.prereq_map import PREREQS
+
+_TERM_PARAM_DESC = (
+    f"Term key in the form <season><year>, one of: {', '.join(TERM_CODES)}. "
+    "Omit to use the current term."
+)
 
 # ── Tool definitions (Ollama/OpenAI format) ───────────────────────────────────
 
@@ -67,7 +70,7 @@ TOOL_DEFS: list[dict] = [
                 "properties": {
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit for current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                     "profile_hints": {
                         "type": "string",
@@ -98,7 +101,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                 },
                 "required": ["subjects"],
@@ -126,7 +129,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                     "excluded_courses": {
                         "type": "array",
@@ -287,7 +290,6 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
     if not urls:
         return f"No new courses found for {subjects} in {term}. All may already be completed."
 
-    url_to_info = {c.detail_url: c for c in to_fetch if c.detail_url}
     html_map = await fetch_details_async(urls[:12])
 
     # Collect all sections then enrich with real seat counts
@@ -499,20 +501,20 @@ async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
                 return _tool_get_my_finances(session)
             case "recommend_courses":
                 return await _tool_recommend_courses(
-                    args.get("term", ""),
+                    resolve_term(args.get("term")),
                     args.get("profile_hints", ""),
                     session,
                 )
             case "find_courses":
                 return await _tool_find_courses(
                     args.get("subjects", []),
-                    args.get("term") or get_current_term(),
+                    resolve_term(args.get("term")),
                     session,
                 )
             case "build_schedule":
                 return await _tool_build_schedule(
                     args.get("preferences", ""),
-                    args.get("term") or get_current_term(),
+                    resolve_term(args.get("term")),
                     session,
                     excluded_courses=args.get("excluded_courses"),
                 )

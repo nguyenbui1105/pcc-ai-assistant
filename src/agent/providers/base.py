@@ -1,9 +1,22 @@
 """Abstract base class for LLM providers with tool-calling support."""
+import re
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from typing import AsyncIterator, Iterator
 
 from src.agent.session import AgentSession
 from src.agent.tools import execute_tool
+
+THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
+
+# Tools whose raw output should bypass the LLM and be streamed directly.
+PASSTHROUGH_TOOLS = frozenset({"build_schedule", "get_my_courses"})
+
+
+def iter_words(text: str) -> Iterator[str]:
+    """Split a final answer into word chunks so it streams word by word."""
+    words = text.split(" ")
+    for i, word in enumerate(words):
+        yield word + (" " if i < len(words) - 1 else "")
 
 
 class LLMProvider(ABC):

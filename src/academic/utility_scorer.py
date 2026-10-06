@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.academic.course_knowledge import CourseMetadata, get_course_metadata
+from src.academic.course_knowledge import get_course_metadata
 from src.academic.student_model import StudentProfile
 from src.schedule.parser import CourseSection
 

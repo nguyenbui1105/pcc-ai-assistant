@@ -246,12 +246,6 @@ def parse_degree_audit(text: str) -> DegreeAudit:
                     seen_codes.add(code)
                     audit.completed_courses.append(code)
 
-    # Parse each requirement block
-    req_pattern = re.compile(
-        r"([\w &/\-]+?)\s+(Requirement is complete|Not complete|When the in-progress classes are completed this requirement should be complete|IN-PROGRESS|INCOMPLETE|COMPLETE)",
-        re.IGNORECASE,
-    )
-
     # Key requirements to track (filter noise)
     tracked = {
         "Health and Wellness", "College Mathematics", "Communication", "Composition",

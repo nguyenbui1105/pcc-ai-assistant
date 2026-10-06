@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.mypcc.parser import DegreeAudit, DegreeRequirement
+from src.mypcc.parser import DegreeAudit
 from src.schedule.gap_analyzer import AAOT_SUBJECT_MAP
 from src.schedule.prereq_map import normalize_code
 
@@ -163,7 +163,7 @@ class AcademicState:
         # In-progress courses this term
         if self.in_progress:
             lines.append("")
-            lines.append(f"IN-PROGRESS THIS TERM (treat as if completed for planning):")
+            lines.append("IN-PROGRESS THIS TERM (treat as if completed for planning):")
             lines.append(f"  {', '.join(sorted(self.in_progress))}")
 
         # Full completed list
@@ -205,8 +205,6 @@ class AcademicState:
           3. For each requirement, compute which courses contribute
           4. Augment GRAD Plan status with in-progress information
         """
-        from src.schedule.gap_analyzer import AAOT_SUBJECT_MAP
-
         # 1. Normalize completed course codes
         completed_norm = frozenset(
             normalize_code(c) for c in (audit.completed_courses or [])
@@ -240,7 +238,8 @@ class AcademicState:
 
             # Augment status: if GRAD Plan says "incomplete" but we have IP courses
             # that contribute, mark as "in_progress" for better LLM context
-            status = req.status
+            # GRAD Plan parser emits "in-progress"; canonical form is "in_progress"
+            status = req.status.replace("-", "_")
             if status == "incomplete" and courses_ip:
                 status = "in_progress"
 
