@@ -4,164 +4,87 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-AI-powered assistant for Portland Community College (PCC) students (optimized for international/F-1 students). The assistant answers questions about PCC policies, provides personalized data from MyPCC and GRAD Plan, and builds conflict-free course schedules.
+Chainlit chat assistant for Portland Community College (PCC) students, tuned for international/F-1 students. It answers PCC policy questions, shows personal data from MyPCC + GRAD Plan, recommends courses, and builds conflict-free schedules from the live pcc.edu schedule. Users may write in English or Vietnamese; the system prompt answers in the user's language, and several keyword tables include Vietnamese terms.
+
+## Commands
+
+```bash
+pip install -r requirements.txt          # also needs `openai` (imported by the 9Router provider, not listed in requirements.txt)
+cp .env.example .env                     # then set GROQ_API_KEY
+
+chainlit run ui/app.py                   # http://localhost:8000
+python scripts/setup_session.py          # opens a browser; log in to MyPCC, GRAD Plan, BANSS → writes data/*_cookies.json
+
+pytest tests/ -v
+pytest tests/test_optimizer.py -v                        # one file
+pytest tests/test_optimizer.py::test_parse_days -v       # one test
+pytest tests/ --cov=src --cov-report=term-missing
+
+# Manual scripts that hit live pcc.edu (no assertions)
+python scripts/test_recommender.py --mock
+python scripts/test_planner.py
+python scripts/test_planner_samples.py   # domestic vs F-1 scenarios
+```
+
+Tests make no network calls. Async tests use the anyio plugin (`pytestmark = pytest.mark.anyio`; `tests/conftest.py` pins the backend to asyncio), and provider tests mock the LLM clients. There is no linter or formatter config.
 
 ## Architecture
 
-The system is an **agentic tool-calling loop**, not a RAG pipeline. The LLM decides which tools to call; tools fetch live data on demand.
+This is an **agentic tool-calling loop**, not RAG. The LLM picks tools, and the tools fetch live data.
 
 ```
-Chainlit UI (ui/app.py)
-    │
-    └─ agent_stream() ── src/agent/loop.py
-            │
-            ├─ Groq (primary, cloud, fast)   llama-3.3-70b-versatile
-            └─ Ollama (local fallback)        qwen3:4b
-                    │
-                    └─ Tool calls (up to 6 iterations):
-                        get_my_courses        → session.personal_context
-                        get_degree_progress   → session.degree_audit
-                        get_my_finances       → session.personal_context
-                        find_courses          → schedule fetcher + parser (live pcc.edu)
-                        build_schedule        → schedule_planner.plan_schedule_async()
-                        search_pcc            → DuckDuckGo site:pcc.edu + page fetch
-                        check_prerequisites   → prereq_map.PREREQS dict
-                        get_pcc_page          → httpx direct page fetch
+ui/app.py (Chainlit) ── on_chat_start: load real session from cookies, else create_demo_session()
+   └─ agent_stream()  src/agent/loop.py
+        ├─ _build_messages(): _SYSTEM prompt + demo/real note + AcademicState.to_llm_context() + history
+        └─ _build_provider_chain() → try each provider in order; on exception, fall through to the next
+             src/agent/providers/{nine_router,groq,ollama}_provider.py
+               └─ stream_with_tools(): up to _MAX_ITER=6 rounds → execute_tool()  (src/agent/tools.py)
 ```
 
-**Session startup** (`ui/app.py:on_start`): tries to load real cookies → on failure, falls back to a hardcoded "Alex" demo student so the UI works without PCC credentials.
+### LLM providers (`LLM_PROVIDER`)
+- `nine_router` → one `NineRouterProvider` per model in `NINE_ROUTER_MODELS` (comma-separated, OpenAI-compatible endpoint at `localhost:20128`), then Groq, then Ollama
+- `groq` (default) → Groq, then Ollama
+- `ollama` → Ollama only (prepends `/no_think` to the user message)
 
-**Tool signal protocol**: the agent loop yields `\x00tool:<name>\x00` sentinel tokens (not rendered) that the UI intercepts to update the step label in real time.
+Fallback happens **only when a provider raises**. A Groq 429 yields a "rate-limited" message and returns without falling back. Groq and 9Router make **non-streaming** calls for tool decisions (streamed tool-call parsing was unreliable with llama models), then emit the final text word by word. Ollama streams and strips `<think>` tags.
 
-## Tech Stack
+Each provider file has its own copy of the iteration loop and of `_PASSTHROUGH_TOOLS = {"build_schedule", "get_my_courses"}`. Output from these tools goes **straight to the user** and the turn ends without another LLM call. To change tool-loop behavior, edit all three providers.
 
-| Layer | Implementation |
-|-------|---------------|
-| LLM (primary) | Groq API — `llama-3.3-70b-versatile` |
-| LLM (local fallback) | Ollama — `qwen3:4b` |
-| Personal data | Playwright cookie-based fetch (MyPCC + GRAD Plan) |
-| Schedule search | httpx async + BeautifulSoup (live pcc.edu schedule pages) |
-| Public PCC search | DuckDuckGo `site:pcc.edu` + httpx page fetch |
-| UI | Chainlit |
-| Config | `pydantic-settings` (`src/config.py`) |
+### Tool protocol
+- Providers yield a `\x00tool:<name>\x00` sentinel before each tool runs. `ui/app.py` intercepts it to relabel the step and never renders it.
+- **Adding or renaming a tool** means updating four places: the `TOOL_DEFS` entry and the `execute_tool()` match case in `src/agent/tools.py`, the TOOLS/RULES list in `_SYSTEM` in `src/agent/loop.py`, and `_TOOL_LABELS` in `ui/app.py`. `recommend_courses` currently has no label, so the UI shows "Using recommend_courses...".
+- Tools return plain strings. `execute_tool` catches exceptions and returns an error string, so a failing tool never breaks the loop.
 
-## Project Structure
+### Session (`src/agent/session.py`)
+`AgentSession` holds `personal_context`, `degree_audit`, `academic_state`, `enrolled_times` (CRN → meeting time), and `history`. History keeps the last 20 messages, and stored assistant replies are cut to 800 chars. `create_demo_session()` builds the "Alex" AAOT/F-1 student and leaves `academic_state` as `None`, so the demo exercises the audit-only code paths. The demo flag changes the system prompt to tell the LLM to label personal data as demo data.
 
-```
-src/
-├── config.py               # Settings (LLM_PROVIDER, GROQ_API_KEY, etc.) via pydantic-settings
-├── agent/
-│   ├── loop.py             # Agent loop: Groq + Ollama streaming, tool call dispatch
-│   ├── tools.py            # Tool definitions (TOOL_DEFS) + execute_tool() + implementations
-│   ├── session.py          # AgentSession dataclass; create_demo_session() for no-cookie mode
-│   ├── schedule_planner.py # plan_schedule_async(): gap analysis → fetch → conflict-free plan
-│   ├── course_recommender.py # Ranked course recommendations from DegreeAudit gaps
-│   └── query_logger.py     # Appends JSONL to data/query_logs.jsonl
-├── mypcc/
-│   ├── fetcher.py          # Playwright: fetch MyPCC pages + GRAD Plan with saved cookies
-│   └── parser.py           # Parse HTML → PersonalContext + DegreeAudit dataclasses
-├── schedule/
-│   ├── fetcher.py          # httpx async: listing pages + detail pages from pcc.edu/schedule
-│   ├── parser.py           # BS4 → CourseInfo (listing) + CourseSection (detail)
-│   ├── optimizer.py        # build_schedule(), parse_prefs(), conflict detection, F-1 rules
-│   ├── gap_analyzer.py     # DegreeAudit incomplete reqs → PCC subject codes (AAOT_SUBJECT_MAP)
-│   └── prereq_map.py       # PREREQS dict: course_code → [required_codes]
-└── llm/
-    └── ollama_llm.py       # Legacy Ollama interface (not used by agent loop)
+### Academic planning layer (`src/academic/`)
+- `AcademicState` (`academic_state.py`) is the **canonical** degree state. It is built once in `ui/app.py` after the GRAD Plan audit loads and is injected into every system prompt as "AUTHORITATIVE — DO NOT RECOMPUTE". Its `completed_all` set is completed ∪ in-progress. When `academic_state` is present, the planner and recommender use it instead of re-deriving from the audit.
+- `redundancy.RedundancyChecker`: drops courses that are completed, superseded (a higher-numbered course in the same subject is done), or saturated (the requirement is effectively met).
+- `student_model.infer_profile()` + `enrich_profile_from_text()` → `StudentProfile` (STEM/CS affinity, transfer target, F-1)
+- `course_knowledge.COURSE_KB` + `utility_scorer`: weighted utility score per course. Filler, support-lab and wellness courses are heavily penalized.
+- `constraint_validator.validate_plan()`: hard constraints are F-1 ≥12 credits total, ≥9 in person, and no time conflicts
 
-ui/
-└── app.py                  # Chainlit: on_start loads session, on_message calls agent_stream
+### Schedule pipeline (`src/agent/schedule_planner.py::plan_schedule_async`)
+`parse_prefs` (natural-language prefs → `SchedulePrefs`) → `analyze_gaps` (incomplete requirements → subject codes) → fetch listings, then details, then capacity → sort by utility, with the redundancy penalty → `optimizer.build_schedule` (greedy) → validate → **repair loop** `_build_with_repair` → `_format_plan`.
 
-scripts/
-├── setup_session.py        # Open browser, log in to MyPCC + GRAD Plan, save cookies
-├── test_planner.py         # Manual test for schedule planner
-├── test_recommender.py     # Manual test for course recommender (--mock flag available)
-└── test_router.py          # Manual test for mypcc router
+The repair loop relaxes soft constraints in this order: subject cap 3 → 6 → drop blocked days → drop time window → any mode/section. Every stage is validated against the **original** prefs' hard constraints. `course_recommender.recommend_courses_async` follows a similar path, but ranks and explains courses instead of building a plan.
 
-tests/                      # pytest: router, optimizer, prereq_map, gap_analyzer
-data/
-├── mypcc_cookies.json      # MyPCC session cookies
-├── gradplan_cookies.json   # GRAD Plan cookies incl. X-AUTH-TOKEN JWT (~7 day expiry)
-└── query_logs.jsonl        # Observability log (ts, route, latency_ms)
-```
+### Data sources
+- **Public schedule** (`src/schedule/fetcher.py`, httpx): listing pages → `CourseInfo`, detail pages → `CourseSection`. The `data-seats` HTML attribute is only a boolean. Real seat and waitlist counts come from a POST to `pcc.edu/schedule/capacity/` (`fetch_capacity_async`) and are merged with `schedule_planner._merge_capacity`.
+- **Personal data** (`src/mypcc/fetcher.py`, headless Playwright plus saved cookies): MyPCC pages → `PersonalContext`; GRAD Plan (JWT, expires about every 7 days, raises `SessionExpiredError`) → `DegreeAudit`. Enrolled meeting times come from the public schedule by CRN.
+- **Policy search** (`search_pcc`): DuckDuckGo (`ddgs`) `site:pcc.edu`, then fetches the top page. When results are empty it falls back to `_PCC_TOPIC_URLS`.
 
-## Key Commands
+## Cross-file invariants
+- **Term keys** (`summer2026`, `fall2026`, ...) are hardcoded in `TERM_CODES`, `TERM_NAMES`, and `TERM_LABELS` in `src/schedule/fetcher.py`. Add each new term to all three. `get_current_term()` falls back to the last key when the computed term is missing.
+- **Requirement names** from the GRAD Plan parser (`"Composition"`, `"Lab Requirement 2"`, ...) are dict keys in `gap_analyzer.AAOT_SUBJECT_MAP`/`REQ_LABELS`, `academic_state._REQ_DESCRIPTIONS`, and `redundancy._SINGLE_COURSE_REQS`/`_MULTI_DISCIPLINE_REQS`. Rename them everywhere at once. Only AAOT is mapped, so other degrees produce no gaps.
+- **Course codes** are compared in normalized form. `prereq_map.normalize_code()` strips leading zeros (`MTH065` → `MTH65`). MyPCC course IDs look like `WR-122-12345` (subject-number-CRN).
 
-```bash
-# Install
-pip install -r requirements.txt
+## Legacy / stale code
+- `src/mypcc/router.py`: a regex query classifier. The agent loop doesn't use it, but `tests/test_router.py` still tests it.
+- `src/llm/ollama_llm.py` (only `scripts/test_llm.py` uses it). `scripts/test_query.py` and `scripts/crawl.py` import modules that no longer exist (`src.pipeline`, `src.crawler`).
+- `litellm_config.yaml` + `scripts/start_proxy.py` run a LiteLLM proxy on port 4000. The `nine_router` provider defaults to 9Router on port 20128 instead (`scripts/start_9router.py`).
+- `.env.example` sets an outdated `GROQ_MODEL`. The code default and `render.yaml` use `llama-3.3-70b-versatile`.
 
-# First-time personal data setup: opens browser for MyPCC + GRAD Plan login
-python scripts/setup_session.py
-
-# Start the chat UI
-chainlit run ui/app.py
-
-# Run tests
-pytest tests/ -v
-pytest tests/ -v --cov=src --cov-report=term-missing
-
-# Run a single test file
-pytest tests/test_optimizer.py -v
-
-# Manual schedule/recommender testing
-python scripts/test_recommender.py --mock   # no cookies needed
-python scripts/test_planner.py
-
-# View observability log
-python -c "import json; [print(json.dumps(r)) for r in [json.loads(l) for l in open('data/query_logs.jsonl')]]"
-```
-
-## Environment Variables
-
-Configured via `.env` (loaded by `pydantic-settings`):
-
-```bash
-# LLM provider: "groq" (default, cloud) or "ollama" (local)
-LLM_PROVIDER=groq
-GROQ_API_KEY=gsk_...
-GROQ_MODEL=llama-3.3-70b-versatile
-
-# Ollama (only needed if LLM_PROVIDER=ollama)
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_LLM_MODEL=qwen3:4b
-
-PCC_BASE_URL=https://www.pcc.edu
-LOG_LEVEL=INFO
-```
-
-## Personal Data Layer
-
-**MyPCC** (`data/mypcc_cookies.json`): fetches dashboard, my-courses, paying-for-college, student-guide pages. Parses into `PersonalContext` (name, degree, advisor, current courses, financial balance, upcoming dates, `is_international` flag).
-
-**GRAD Plan** (`data/gradplan_cookies.json`): fetches `gradplan.pcc.edu` with `X-AUTH-TOKEN` JWT. Parses into `DegreeAudit` (degree name, GPA, credits applied/required, per-requirement status with `still_needed` field, completed course list).
-
-Cookie refresh: run `scripts/setup_session.py`. GRAD Plan JWT expires ~7 days.
-
-**Demo mode**: when cookies are missing/expired, `create_demo_session()` returns a realistic AAOT student ("Alex") so the UI is always usable.
-
-## Schedule Planning
-
-`find_courses` and `build_schedule` tools both fetch **live** data from `pcc.edu/schedule`:
-- Listing pages → `CourseInfo` (course_code, title, detail_url)
-- Detail pages → `CourseSection` (CRN, time, days, instructor, credits, `is_open`)
-
-`build_schedule` calls `plan_schedule_async()` which: reads `DegreeAudit` gaps → maps to subject codes (`AAOT_SUBJECT_MAP`) → fetches live sections → runs `optimizer.build_schedule()` (conflict detection, prereq filter, F-1 enforcement ≥12cr / ≥9 in-person).
-
-`data-seats` in PCC HTML is boolean (1=open), not actual seat count — JS renders the number client-side.
-
-## Agent Loop Details
-
-- Max 6 tool-call iterations per query (`_MAX_ITER = 6`)
-- Groq uses **non-streaming** for tool-decision calls (avoids streaming tool-call parsing bugs in llama models), then re-streams the final text answer word-by-word
-- Ollama uses streaming throughout; `<think>` tags are stripped
-- History: last 10 messages (5 turns) appended to each call
-- Temperature: 0.3 for both providers
-
-## Known Constraints
-
-- PCC schedule `data-seats` is boolean, not a count — cannot show "X seats left"
-- GRAD Plan JWT expires ~7 days — run `setup_session.py` to refresh
-- `search_pcc` relies on DuckDuckGo rate limits — can fail silently (returns empty results gracefully)
-- Ollama `/no_think` prefix is prepended to user messages to suppress reasoning token leakage
-- Subject code mapping in `gap_analyzer.py` covers AAOT only; other degrees may return incomplete gaps
+## Deployment
+`render.yaml` deploys the Chainlit app to Render. Cookie files are gitignored, so a deployed instance runs in demo mode unless the cookies are placed on a persistent disk.
