@@ -20,7 +20,20 @@ from dataclasses import dataclass, field
 
 from src.academic.course_knowledge import get_course_metadata
 from src.academic.student_model import StudentProfile
+from src.schedule.gap_analyzer import REQ_LABELS
 from src.schedule.parser import CourseSection
+
+# HIGH PRIORITY requirements by GRAD Plan name (label keywords matched
+# "science" in "Social Sciences"): labs + math for STEM, math for CS students
+_STEM_PRIORITY_REQS = frozenset({
+    "College Mathematics",
+    "Lab Requirement 1",
+    "Lab Requirement 2",
+    "Lab Requirement 3",
+    "Science/Math/Computer Science",
+})
+_CS_PRIORITY_REQS = frozenset({"College Mathematics", "Science/Math/Computer Science"})
+_REQ_BY_LABEL = {label: name for name, label in REQ_LABELS.items()}
 
 
 @dataclass
@@ -179,20 +192,19 @@ def rank_courses_for_display(
     return results
 
 
-def is_high_priority_gap(gap_label: str, profile: StudentProfile) -> bool:
+def is_high_priority_gap(requirement: str, profile: StudentProfile) -> bool:
     """True if this requirement should be treated as HIGH PRIORITY for this student.
+
+    `requirement` is the GRAD Plan requirement name (SubjectGap.requirement);
+    a display label from REQ_LABELS is accepted too.
 
     Lab sciences are high priority for STEM students.
     Core math is high priority for CS/STEM students.
-    Wellness is low priority for everyone unless it's the only thing left.
+    Everything else (Social Sciences, Arts & Letters, wellness, ...) is not.
     """
-    label_lower = gap_label.lower()
-    if profile.is_stem_oriented and any(
-        kw in label_lower for kw in ["lab", "science", "math", "cs", "computing"]
-    ):
+    name = _REQ_BY_LABEL.get(requirement, requirement)
+    if profile.is_stem_oriented and name in _STEM_PRIORITY_REQS:
         return True
-    if profile.is_cs_oriented and "math" in label_lower:
+    if profile.is_cs_oriented and name in _CS_PRIORITY_REQS:
         return True
-    if any(kw in label_lower for kw in ["wellness", "pe", "health", "activity"]):
-        return False
     return False

@@ -15,8 +15,9 @@ _STEM_SUBJECTS = frozenset(
     ["CS", "MTH", "PHY", "CH", "BI", "G", "ES", "CIS", "EET", "MET", "ET"]
 )
 
-# Subjects associated with CS / computing specifically
-_CS_SUBJECTS = frozenset(["CS", "CIS", "MTH"])
+# Subjects associated with CS / computing specifically. MTH is not one:
+# every AAOT student takes college math, so it says nothing about CS interest.
+_CS_SUBJECTS = frozenset(["CS", "CIS"])
 
 # Transfer target keywords → canonical name
 _TRANSFER_ALIASES: dict[str, str] = {
@@ -33,7 +34,7 @@ class StudentProfile:
     """Structured representation of a student's academic context and goals."""
 
     # Identity / goals
-    major_interest: str = "General"    # "CS/STEM", "Natural Sciences", "Nursing",
+    major_interest: str = "General"    # "CS/STEM", "STEM", "Natural Sciences", "Nursing",
                                         # "Business", "Liberal Arts", "General"
     transfer_target: str = ""          # "PSU", "OSU", "UO", ""
 
@@ -98,15 +99,16 @@ def infer_profile(audit: DegreeAudit, is_f1: bool = False) -> StudentProfile:
         profile.stem_affinity = min(1.0, stem_count / len(completed))
         profile.cs_affinity   = min(1.0, cs_count   / len(completed))
 
-    # Major interest inference
-    if cs_count >= 2 or (stem_count >= 3 and cs_count >= 1):
+    # Major interest inference. CS/STEM needs actual CS/CIS courses; the AAOT
+    # math + lab courses alone only count as STEM when they dominate the transcript.
+    if cs_count >= 2 or (cs_count >= 1 and stem_count >= 3 and profile.stem_affinity >= 0.3):
         profile.major_interest = "CS/STEM"
-    elif stem_count >= 3:
+    elif stem_count >= 3 and profile.stem_affinity >= 0.3:
         bio_chem = sum(
             1 for c in completed
             if _course_subject(c) in {"BI", "CH", "PHY", "G", "ES"}
         )
-        profile.major_interest = "Natural Sciences" if bio_chem >= 2 else "CS/STEM"
+        profile.major_interest = "Natural Sciences" if bio_chem >= 2 else "STEM"
     elif any(_course_subject(c) in {"SOC", "PSY", "HST", "ANTH", "EC", "PS"} for c in completed):
         profile.major_interest = "Liberal Arts"
     else:

@@ -24,8 +24,10 @@ from src.schedule.optimizer import (
     SchedulePrefs,
     SchedulePlan,
     build_schedule,
+    is_in_person,
     parse_prefs,
     section_credits,
+    section_meetings,
 )
 from src.schedule.parser import CourseInfo, CourseSection, parse_detail_html, parse_listing_html
 
@@ -259,7 +261,7 @@ def _merge_capacity(sections: list[CourseSection], capacity: dict) -> None:
 
 
 def _inperson_credits(sections: list[CourseSection]) -> int:
-    return sum(section_credits(s) for s in sections if s.section_type != "Online")
+    return sum(section_credits(s) for s in sections if is_in_person(s))
 
 
 def _format_plan(
@@ -322,7 +324,10 @@ def _format_plan(
             detail_parts.append(sec.section_type)
         if sec.location:
             detail_parts.append(sec.location)
-        schedule = " ".join(filter(None, [sec.days, sec.time]))
+        # Main meeting plus any extra rows (e.g. a lab): "Tuesday 9am–10:50am + Thursday 3pm–5:50pm"
+        schedule = " + ".join(
+            filter(None, (" ".join(filter(None, meeting)) for meeting in section_meetings(sec)))
+        )
         if schedule:
             detail_parts.append(schedule)
         if sec.date_range:
@@ -468,13 +473,16 @@ async def plan_schedule_async(
     )
 
     if not plan or not plan.sections:
+        # Even the last repair stage (all preferences relaxed) found nothing, so the cause is
+        # availability, not time conflicts.
         hint = (
             " As an F-1 student, you need ≥12 credits with ≥9 in-person."
             if is_international else ""
         )
         return (
-            f"Could not find a conflict-free schedule matching your preferences.{hint} "
-            f"Try relaxing constraints or requesting a different term."
+            f"Could not find any open sections for your remaining requirements in {term_label}.{hint} "
+            f"Classes may be full, already on your record, or not posted yet — try a different term, "
+            f"or use **Find Courses** to search for specific subjects."
         )
 
     gaps = analyze_gaps(audit)

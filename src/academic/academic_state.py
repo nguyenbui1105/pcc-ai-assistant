@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from src.mypcc.parser import DegreeAudit
+from src.mypcc.parser import DegreeAudit, DegreeRequirement
 from src.schedule.gap_analyzer import AAOT_SUBJECT_MAP
 from src.schedule.prereq_map import normalize_code
 
@@ -97,7 +97,7 @@ class AcademicState:
     in_progress: frozenset[str]     # enrolled this term
     completed_all: frozenset[str]   # completed | in_progress (for filtering)
 
-    # Requirement statuses (GRAD Plan authoritative + IP augmentation)
+    # Requirement statuses (GRAD Plan authoritative, never upgraded from enrollment)
     requirements: list[RequirementProgress]
 
     is_f1: bool = False
@@ -203,7 +203,8 @@ class AcademicState:
           1. Normalize all course codes
           2. Build in_progress from current_courses
           3. For each requirement, compute which courses contribute
-          4. Augment GRAD Plan status with in-progress information
+          4. Keep GRAD Plan's status; attach in-progress courses only to
+             requirements GRAD Plan reports as in progress
         """
         # 1. Normalize completed course codes
         completed_norm = frozenset(
@@ -224,24 +225,42 @@ class AcademicState:
         in_progress = frozenset(ip_codes)
         completed_all = completed_norm | in_progress
 
-        # 3. Map completed + IP courses to their requirement subjects
+        # 3. Map completed + IP courses to their requirement subjects by exact
+        #    subject code (a prefix match put ESOL252 under "ES", SPA101 under "SP")
         def _courses_in_subjects(codes: frozenset[str], subjects: list[str]) -> list[str]:
-            return sorted(c for c in codes if any(c.startswith(s) for s in subjects))
+            return sorted(
+                c for c in codes
+                if (m := re.match(r"[A-Z]+", c)) and m.group(0) in subjects
+            )
+
+        # GRAD Plan parser emits "in-progress"; canonical form is "in_progress"
+        def _status(req: DegreeRequirement) -> str:
+            return req.status.replace("-", "_")
+
+        # In-progress courses are credited only to requirements GRAD Plan reports
+        # as in progress, and each course to one requirement at most (the most
+        # specific first: Composition [WR] before Arts and Letters [WR, ENG, ...]).
+        # An "incomplete" requirement is never upgraded from a subject match, which
+        # credited WR122 to both Composition and Arts and Letters.
+        ip_by_req: dict[str, list[str]] = {}
+        claimed: set[str] = set()
+        ip_reqs = [r for r in (audit.requirements or []) if _status(r) == "in_progress"]
+        for req in sorted(ip_reqs, key=lambda r: len(AAOT_SUBJECT_MAP.get(r.name, []))):
+            courses = [
+                c for c in _courses_in_subjects(in_progress, AAOT_SUBJECT_MAP.get(req.name, []))
+                if c not in claimed
+            ]
+            claimed.update(courses)
+            ip_by_req[req.name] = courses
 
         # 4. Build RequirementProgress for each requirement
         req_progresses: list[RequirementProgress] = []
         for req in (audit.requirements or []):
             subjects = AAOT_SUBJECT_MAP.get(req.name, [])
             courses_done = _courses_in_subjects(completed_norm, subjects)
-            courses_ip = _courses_in_subjects(in_progress, subjects)
+            courses_ip = ip_by_req.get(req.name, [])
             description = _REQ_DESCRIPTIONS.get(req.name, "")
-
-            # Augment status: if GRAD Plan says "incomplete" but we have IP courses
-            # that contribute, mark as "in_progress" for better LLM context
-            # GRAD Plan parser emits "in-progress"; canonical form is "in_progress"
-            status = req.status.replace("-", "_")
-            if status == "incomplete" and courses_ip:
-                status = "in_progress"
+            status = _status(req)
 
             req_progresses.append(RequirementProgress(
                 name=req.name,

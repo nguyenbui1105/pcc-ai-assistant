@@ -67,8 +67,9 @@ class DegreeRequirement:
     still_needed: str = ""
 
 
-_GRAD_COURSE_RE = re.compile(r"\b([A-Z]{2,4})\s+(\d{3}[A-Z]?)\b")
-_MYPCC_COURSE_ID_RE = re.compile(r"([A-Z]{2,4})-(\d{3}[A-Z]?)-\d{5}")
+# Subjects are 1–4 letters (G = Geology)
+_GRAD_COURSE_RE = re.compile(r"\b([A-Z]{1,4})\s+(\d{3}[A-Z]?)\b")
+_MYPCC_COURSE_ID_RE = re.compile(r"([A-Z]{1,4})-(\d{3}[A-Z]?)-\d{5}")
 
 
 def _course_id_to_code(course_id: str) -> str:
@@ -223,29 +224,6 @@ def parse_degree_audit(text: str) -> DegreeAudit:
         audit.credits_required = int(m.group(1))
         audit.credits_applied = int(m.group(2))
 
-    # Extract completed course codes from GRAD Plan text
-    # Strategy: scan each line; if a line contains a known course-code pattern
-    # AND is NOT in a "Still needed" section, collect it.
-    in_still_needed = False
-    seen_codes: set[str] = set()
-    for line in text.splitlines():
-        stripped = line.strip()
-        if "Still needed" in stripped:
-            in_still_needed = True
-        elif stripped and any(
-            kw in stripped for kw in ("Requirement is complete", "Not complete", "IN-PROGRESS",
-                                      "INCOMPLETE", "COMPLETE", "Credits required", "Credits applied",
-                                      "Overall GPA", "Associate of")
-        ):
-            in_still_needed = False
-
-        if not in_still_needed:
-            for m in _GRAD_COURSE_RE.finditer(stripped):
-                code = m.group(1) + m.group(2)
-                if code not in seen_codes:
-                    seen_codes.add(code)
-                    audit.completed_courses.append(code)
-
     # Key requirements to track (filter noise)
     tracked = {
         "Health and Wellness", "College Mathematics", "Communication", "Composition",
@@ -255,6 +233,35 @@ def parse_degree_audit(text: str) -> DegreeAudit:
         "AAOT Credit Total", "Oregon Transfer Requirements",
         "Foundational Requirements", "Discipline Studies Requirements",
     }
+
+    # Extract completed course codes from GRAD Plan text
+    # Strategy: scan each line; if a line contains a known course-code pattern
+    # AND is NOT in a "Still needed" section, collect it.
+    # A "Still needed" section ends at the next requirement or status line. Status
+    # wording varies in case ("Requirement will be complete when the in-progress
+    # classes are finished"), so those phrases are matched case-insensitively.
+    in_still_needed = False
+    seen_codes: set[str] = set()
+    for line in text.splitlines():
+        stripped = line.strip()
+        lower = stripped.lower()
+        if "Still needed" in stripped:
+            in_still_needed = True
+        elif stripped and (
+            stripped.startswith(tuple(tracked))
+            or any(kw in lower for kw in ("requirement is complete", "not complete",
+                                          "in-progress", "incomplete"))
+            or any(kw in stripped for kw in ("COMPLETE", "Credits required", "Credits applied",
+                                             "Overall GPA", "Associate of"))
+        ):
+            in_still_needed = False
+
+        if not in_still_needed:
+            for m in _GRAD_COURSE_RE.finditer(stripped):
+                code = m.group(1) + m.group(2)
+                if code not in seen_codes:
+                    seen_codes.add(code)
+                    audit.completed_courses.append(code)
 
     seen: set[str] = set()
     lines = text.splitlines()
@@ -344,7 +351,7 @@ def _parse_courses(text: str, ctx: PersonalContext) -> None:
     if m:
         ctx.current_term = m.group(0)
 
-    course_id_re = re.compile(r"([A-Z]{2,4}-\d{3}-\d{5})")
+    course_id_re = re.compile(r"([A-Z]{1,4}-\d{3}[A-Z]?-\d{5})")
     lines = text.splitlines()
     for i, line in enumerate(lines):
         mid = course_id_re.search(line)

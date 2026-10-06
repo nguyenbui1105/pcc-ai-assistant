@@ -2,9 +2,9 @@
 from typing import AsyncIterator
 
 from loguru import logger
-from ollama import AsyncClient, Message
+from ollama import AsyncClient
 
-from src.agent.providers.base import PASSTHROUGH_TOOLS, THINK_RE, LLMProvider, iter_words
+from src.agent.providers.base import EMPTY_ANSWER, PASSTHROUGH_TOOLS, THINK_RE, LLMProvider, iter_words
 from src.agent.session import AgentSession
 from src.config import settings
 
@@ -26,7 +26,10 @@ class OllamaProvider(LLMProvider):
 
         for iteration in range(max_iterations):
             collected_content = ""
-            final_message: Message | None = None
+            # Ollama >= 0.8 streams tool calls in non-final chunks, older versions
+            # on the done chunk, so collect them from every chunk.
+            tool_calls: list = []
+            done = False
 
             async for chunk in await self._client.chat(
                 model=settings.ollama_llm_model,
@@ -38,22 +41,30 @@ class OllamaProvider(LLMProvider):
                 content = chunk.message.content or ""
                 if content:
                     collected_content += content
+                if chunk.message.tool_calls:
+                    tool_calls.extend(chunk.message.tool_calls)
                 if chunk.done:
-                    final_message = chunk.message
+                    done = True
 
-            if final_message is None:
+            if not done:
                 yield "\n\nError: no response from model."
                 return
 
-            tool_calls = final_message.tool_calls
             if not tool_calls:
                 # No tool call — strip think tags and yield word-by-word
                 clean = THINK_RE.sub("", collected_content).strip()
-                for chunk in iter_words(clean):
+                for chunk in iter_words(clean or EMPTY_ANSWER):
                     yield chunk
                 return
 
-            messages.append(final_message)
+            messages.append({
+                "role": "assistant",
+                "content": collected_content,
+                "tool_calls": [
+                    {"function": {"name": c.function.name, "arguments": dict(c.function.arguments)}}
+                    for c in tool_calls
+                ],
+            })
             logger.info(f"Iter {iteration + 1}: {[c.function.name for c in tool_calls]}")
 
             for call in tool_calls:

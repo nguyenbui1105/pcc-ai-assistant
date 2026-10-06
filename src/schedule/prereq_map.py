@@ -1,15 +1,27 @@
 """Static prerequisite map for common PCC/AAOT courses."""
 import re as _re
 
-_NORM_RE = _re.compile(r'^([A-Za-z]+)0+(\d+\w*)$')
+_NORM_RE = _re.compile(r'^([A-Z]+)0*(\d+)(\w*)$')
 
 
 def normalize_code(code: str) -> str:
-    """Strip leading zeros from the numeric part: 'MTH065' → 'MTH65', 'WR121' → 'WR121'."""
-    m = _NORM_RE.match(code.strip().upper())
-    return (m.group(1) + m.group(2)) if m else code.strip().upper()
+    """Canonical form for comparing course codes.
 
-# Maps course_code → list of accepted prereqs (any one satisfies)
+    Uppercase, whitespace/hyphens removed, leading zeros of the number stripped,
+    and a trailing Oregon common-course-numbering 'Z' dropped:
+    ' mth 065' → 'MTH65', 'WR 122Z' → 'WR122', 'PSY201A' → 'PSY201A'.
+    """
+    code = _re.sub(r'[\s-]+', '', code).upper()
+    m = _NORM_RE.match(code)
+    if not m:
+        return code
+    suffix = '' if m.group(3) == 'Z' else m.group(3)
+    return m.group(1) + m.group(2) + suffix
+
+# Maps course_code → list of prereqs. Every entry is required (AND):
+# get_missing_prereqs reports each one not yet met, so has_prereqs_met needs all.
+# "Or placement"-style alternatives aren't modeled. A prereq counts as met when it,
+# or a course that supersedes it (a later course in its chain), is completed.
 # Empty list = no prereq required
 # Based on PCC course catalog: https://www.pcc.edu/schedule/
 PREREQS: dict[str, list[str]] = {
@@ -39,6 +51,8 @@ PREREQS: dict[str, list[str]] = {
     "MTH211": ["MTH112"],
     "MTH241": ["MTH112"],
     "MTH251": ["MTH112"],
+    "MTH252": ["MTH251"],         # Calculus II
+    "MTH253": ["MTH252"],         # Calculus III
 
     # ── Biology ───────────────────────────────────────────────────────────
     "BI101": [],
@@ -158,8 +172,8 @@ PREREQS: dict[str, list[str]] = {
 def get_superseded_courses(completed: list[str]) -> set[str]:
     """Return ALL transitive prerequisites of any completed course (normalized).
 
-    Example: MTH112 done → MTH111, MTH095/MTH95, MTH065/MTH65 all superseded.
-    Both long ('MTH065') and short ('MTH65') forms are returned.
+    Example: MTH112 done → MTH111, MTH95, MTH65 all superseded.
+    Codes are returned in normalize_code form ('MTH65', not 'MTH065').
     """
     completed_norm = {normalize_code(c) for c in completed}
     # Build a normalized version of PREREQS for lookup
@@ -177,7 +191,11 @@ def get_superseded_courses(completed: list[str]) -> set[str]:
 
 
 def get_missing_prereqs(course_code: str, completed: list[str]) -> list[str]:
-    """Return list of prereqs that the student hasn't completed yet."""
+    """Return list of prereqs that the student hasn't met yet.
+
+    A prereq is met when it, or a course that supersedes it, is in completed
+    (WR122 done → WR115 met). completed may include in-progress courses.
+    """
     norm_code = normalize_code(course_code)
     prereqs_norm = {normalize_code(k): [normalize_code(p) for p in v]
                     for k, v in PREREQS.items()}
@@ -185,7 +203,8 @@ def get_missing_prereqs(course_code: str, completed: list[str]) -> list[str]:
     if not prereqs:
         return []
     completed_norm = {normalize_code(c) for c in completed}
-    return [p for p in prereqs if p not in completed_norm]
+    satisfied = completed_norm | get_superseded_courses(completed)
+    return [p for p in prereqs if p not in satisfied]
 
 
 def has_prereqs_met(course_code: str, completed: list[str]) -> bool:

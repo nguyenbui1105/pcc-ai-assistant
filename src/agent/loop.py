@@ -97,13 +97,15 @@ def _build_provider_chain() -> list:
 
 async def agent_stream(question: str, session: AgentSession) -> AsyncIterator[str]:
     """Agentic tool-calling loop with automatic provider fallback chain."""
-    messages = _build_messages(question, session)
+    base_messages = _build_messages(question, session)
     providers = _build_provider_chain()
 
     for provider in providers:
         try:
+            # Providers append SDK message objects during tool rounds — give each its
+            # own copy so a provider that fails mid-turn can't poison the next one.
             async for chunk in provider.stream_with_tools(
-                messages, session, max_iterations=_MAX_ITER
+                list(base_messages), session, max_iterations=_MAX_ITER
             ):
                 yield chunk
             return

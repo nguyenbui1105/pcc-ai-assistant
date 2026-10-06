@@ -2,7 +2,7 @@
 from src.academic.academic_state import AcademicState
 from src.agent.session import create_demo_session
 from src.mypcc.parser import CourseInfo, DegreeAudit, DegreeRequirement
-from src.schedule.fetcher import TERM_LABELS, get_current_term
+from src.schedule.fetcher import TERM_LABELS, get_in_session_term
 
 
 def _audit(*reqs: DegreeRequirement, completed: list[str] | None = None) -> DegreeAudit:
@@ -27,13 +27,17 @@ def test_grad_plan_in_progress_status_is_normalized():
     assert "⏳ Composition" in req.summary_line()
 
 
-def test_incomplete_with_enrolled_course_becomes_in_progress():
+def test_incomplete_with_enrolled_course_stays_incomplete():
+    # GRAD Plan status is authoritative: an enrolled course in the requirement's
+    # subject doesn't upgrade it, it is only listed as in progress this term
     state = AcademicState.from_session(
         _audit(DegreeRequirement("College Mathematics", "incomplete")),
         current_courses=[CourseInfo("College Algebra", "MTH-111-23456", "Prof. Chen")],
     )
-    assert state.requirements[0].status == "in_progress"
+    assert state.requirements[0].status == "incomplete"
+    assert state.requirements[0].courses_ip == []
     assert state.in_progress == frozenset({"MTH111"})
+    assert "MTH111" in state.to_llm_context()
 
 
 def test_completed_all_includes_in_progress_and_normalizes_codes():
@@ -48,7 +52,7 @@ def test_completed_all_includes_in_progress_and_normalizes_codes():
 def test_demo_session_has_academic_state_and_current_term():
     session = create_demo_session()
     assert session.is_demo
-    assert session.personal_context.current_term == TERM_LABELS[get_current_term()]
+    assert session.personal_context.current_term == TERM_LABELS[get_in_session_term()]
     state = session.academic_state
     assert state is not None
     assert state.is_f1

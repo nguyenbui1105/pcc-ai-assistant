@@ -5,7 +5,14 @@ from typing import AsyncIterator
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.agent.providers.base import PASSTHROUGH_TOOLS, THINK_RE, LLMProvider, iter_words
+from src.agent.providers.base import (
+    EMPTY_ANSWER,
+    PASSTHROUGH_TOOLS,
+    THINK_RE,
+    LLMProvider,
+    assistant_tool_call_message,
+    iter_words,
+)
 from src.agent.session import AgentSession
 from src.agent.tools import TOOL_DEFS
 
@@ -67,12 +74,11 @@ class NineRouterProvider(LLMProvider):
 
             if not tool_calls:
                 content = THINK_RE.sub("", choice.message.content or "").strip()
-                if content:
-                    for chunk in iter_words(content):
-                        yield chunk
+                for chunk in iter_words(content or EMPTY_ANSWER):
+                    yield chunk
                 return
 
-            messages.append(choice.message)
+            messages.append(assistant_tool_call_message(choice.message.content, tool_calls))
             logger.info(f"Iter {iteration + 1}: {[tc.function.name for tc in tool_calls]}")
 
             for tc in tool_calls:

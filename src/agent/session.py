@@ -41,9 +41,10 @@ class AgentSession:
 def create_demo_session() -> AgentSession:
     """Realistic demo student for portfolio / public demo — no real PCC account needed."""
     from src.academic.academic_state import AcademicState
-    from src.schedule.fetcher import TERM_LABELS, get_current_term
+    from src.schedule.fetcher import TERM_LABELS, get_in_session_term
 
-    current_term = TERM_LABELS[get_current_term()]
+    # The term the demo student is enrolled in now (can be winter), not the planning default.
+    current_term = TERM_LABELS[get_in_session_term()]
 
     audit = DegreeAudit(
         degree="Associate of Arts Oregon Transfer (AAOT)",
@@ -54,7 +55,7 @@ def create_demo_session() -> AgentSession:
         requirements=[
             DegreeRequirement("Communication", "complete"),
             DegreeRequirement("Composition", "in-progress", still_needed="WR122"),
-            DegreeRequirement("College Mathematics", "incomplete", still_needed="MTH111 or higher"),
+            DegreeRequirement("College Mathematics", "in-progress", still_needed="MTH111"),
             DegreeRequirement("Health and Wellness", "incomplete", still_needed="Any PE or HE course"),
             DegreeRequirement("Arts and Letters", "incomplete", still_needed="Any AL-coded course"),
             DegreeRequirement("Social Sciences", "complete"),

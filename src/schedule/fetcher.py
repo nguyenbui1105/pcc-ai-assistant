@@ -28,6 +28,22 @@ def _build_term_tables(center_year: int) -> tuple[dict[str, str], dict[str, str]
 # Term key ("fall2026") → PCC term code / URL slug ("fall") / display label ("Fall 2026").
 TERM_CODES, TERM_NAMES, TERM_LABELS = _build_term_tables(datetime.now().year)
 
+
+def _sync_term_tables() -> None:
+    """Extend the term tables once the clock moves past the year they were built for.
+
+    A long-running process would otherwise compute term keys that are missing from
+    the tables. Updates in place (never rebinds) so modules that imported the dicts
+    see the new keys.
+    """
+    codes, names, labels = _build_term_tables(datetime.now().year)
+    if codes.keys() <= TERM_CODES.keys():
+        return
+    TERM_CODES.update(codes)
+    TERM_NAMES.update(names)
+    TERM_LABELS.update(labels)
+
+
 _API_BASE = "https://www.pcc.edu/schedule/default.cfm"
 _HEADERS = {
     "User-Agent": (
@@ -129,10 +145,28 @@ def get_current_term() -> str:
 
     Jan–Mar → spring<year>, Apr–Jul → summer<year>, Aug–Dec → fall<year>.
     """
+    _sync_term_tables()
     now = datetime.now()
     if now.month <= 3:
         return f"spring{now.year}"
     if now.month <= 7:
+        return f"summer{now.year}"
+    return f"fall{now.year}"
+
+
+def get_in_session_term() -> str:
+    """Return the key of the term in session today (for "this term" labels).
+
+    Jan–Mar → winter, Apr–mid-Jun → spring, mid-Jun–Aug → summer, Sep–Dec → fall.
+    Unlike get_current_term() (the planning default) this can be a winter term.
+    """
+    _sync_term_tables()
+    now = datetime.now()
+    if now.month <= 3:
+        return f"winter{now.year}"
+    if (now.month, now.day) <= (6, 15):
+        return f"spring{now.year}"
+    if now.month <= 8:
         return f"summer{now.year}"
     return f"fall{now.year}"
 
@@ -145,6 +179,7 @@ def resolve_term(term: str | None = None) -> str:
     """
     if not term:
         return get_current_term()
+    _sync_term_tables()
     key = re.sub(r"[\s_-]", "", term).lower()
     if key not in TERM_CODES:
         raise ValueError(f"Unknown term {term!r}. Valid terms: {', '.join(TERM_CODES)}")

@@ -11,12 +11,36 @@ THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 # Tools whose raw output should bypass the LLM and be streamed directly.
 PASSTHROUGH_TOOLS = frozenset({"build_schedule", "get_my_courses"})
 
+# Yielded instead of a blank reply when the model's final answer is empty
+# (e.g. it only produced <think> text).
+EMPTY_ANSWER = "Sorry, I couldn't generate an answer. Please try rephrasing your question."
+
 
 def iter_words(text: str) -> Iterator[str]:
     """Split a final answer into word chunks so it streams word by word."""
     words = text.split(" ")
     for i, word in enumerate(words):
         yield word + (" " if i < len(words) - 1 else "")
+
+
+def assistant_tool_call_message(content: str | None, tool_calls: list) -> dict:
+    """OpenAI-format assistant turn (Groq, 9Router) as a plain dict.
+
+    Appending the SDK message object instead would leave a pydantic object in
+    the messages list that other clients (e.g. ollama) cannot validate.
+    """
+    return {
+        "role": "assistant",
+        "content": content,
+        "tool_calls": [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments or "{}"},
+            }
+            for tc in tool_calls
+        ],
+    }
 
 
 class LLMProvider(ABC):
