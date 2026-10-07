@@ -18,23 +18,22 @@ args = parser.parse_args()
 
 # ── Test single subject parsing ────────────────────────────────────────────
 if args.subject:
-    from src.schedule.fetcher import fetch_subjects
-    from src.schedule.parser import parse_schedule_html
+    from src.schedule.fetcher import fetch_listings
+    from src.schedule.parser import parse_listing_html
 
-    logger.info(f"Fetching schedule for {args.subject}/{args.term}...")
-    html_map = fetch_subjects([args.subject], term=args.term)
-    html = html_map.get(args.subject, "")
+    logger.info(f"Fetching schedule listing for {args.subject}/{args.term or 'current term'}...")
+    html = fetch_listings([args.subject], term=args.term).get(args.subject, "")
     if not html:
         print(f"ERROR: no HTML returned for {args.subject}")
         sys.exit(1)
 
-    print(f"\n--- Raw HTML excerpt (first 2000 chars) ---")
+    print("\n--- Raw HTML excerpt (first 2000 chars) ---")
     print(html[:2000])
-    print("\n--- Parsed sections ---")
-    sections = parse_schedule_html(html, args.subject)
-    print(f"Total sections: {len(sections)}")
-    for s in sections[:10]:
-        print(f"  {s.summary()}")
+    print("\n--- Parsed courses ---")
+    courses = parse_listing_html(html, args.subject)
+    print(f"Total courses: {len(courses)}")
+    for c in courses[:10]:
+        print(f"  {c.course_code} — {c.title}  {c.detail_url}")
     sys.exit(0)
 
 # ── Full recommender test ──────────────────────────────────────────────────

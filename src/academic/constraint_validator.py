@@ -8,7 +8,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from itertools import combinations
 
-from src.schedule.optimizer import SchedulePlan, SchedulePrefs, section_credits, sections_conflict
+from src.schedule.optimizer import (
+    SchedulePlan, SchedulePrefs, is_in_person, section_credits, sections_conflict,
+)
 
 
 @dataclass
@@ -29,7 +31,7 @@ def validate_plan(plan: SchedulePlan, prefs: SchedulePrefs) -> list[PlanViolatio
 
     violations: list[PlanViolation] = []
     total = plan.total_credits
-    inperson_cr = sum(section_credits(s) for s in plan.sections if s.section_type != "Online")
+    inperson_cr = sum(section_credits(s) for s in plan.sections if is_in_person(s))
 
     # ── HARD: F-1 minimum total credits ─────────────────────────────────────
     if prefs.is_international and total < 12:

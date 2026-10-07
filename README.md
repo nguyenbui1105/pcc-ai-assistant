@@ -8,7 +8,7 @@ Ask about PCC policies, view your personal academic data, get course recommendat
 
 - **Personalized data** — reads your live MyPCC courses, financial balance, and GRAD Plan degree audit via cookie-based auth
 - **Schedule builder** — finds open sections, checks prerequisites, enforces F-1 enrollment rules (≥12cr, ≥9 in-person), eliminates time conflicts
-- **Course recommender** — ranks courses by how many degree requirements they fulfill
+- **Course recommender** — ranks courses for open degree requirements by strategic value (transfer, STEM/CS, prerequisite unlocks)
 - **PCC search** — searches pcc.edu in real time for policy questions
 - **Demo mode** — works without PCC credentials using a realistic sample student ("Alex")
 
@@ -17,12 +17,13 @@ Ask about PCC policies, view your personal academic data, get course recommendat
 Agentic tool-calling loop — the LLM decides which tools to call; tools fetch live data on demand.
 
 ```
-Chainlit UI  →  Agent Loop (Groq primary / Ollama fallback)
+Chainlit UI  →  Agent Loop (provider chain: [9Router →] Groq → Ollama)
                      │
                      └── Tool calls (up to 6 per query):
                            get_my_courses        → MyPCC session
                            get_degree_progress   → GRAD Plan audit
                            get_my_finances       → MyPCC session
+                           recommend_courses     → utility-ranked courses for open requirements
                            find_courses          → live pcc.edu/schedule
                            build_schedule        → optimizer + planner
                            search_pcc            → DuckDuckGo + httpx
@@ -35,6 +36,7 @@ Chainlit UI  →  Agent Loop (Groq primary / Ollama fallback)
 | Layer | Implementation |
 |---|---|
 | LLM (primary) | Groq API — `llama-3.3-70b-versatile` |
+| LLM (optional router) | 9Router — OpenAI-compatible local router, tried before Groq |
 | LLM (fallback) | Ollama — `qwen3:4b` (local) |
 | Personal data | Playwright cookie-based fetch |
 | Schedule data | httpx async + BeautifulSoup (live pcc.edu) |
@@ -86,7 +88,14 @@ src/
 │   ├── schedule_planner.py      # plan_schedule_async()
 │   ├── course_recommender.py    # Ranked recommendations from degree gaps
 │   ├── query_logger.py          # JSONL observability log
-│   └── providers/               # LLM provider abstraction
+│   └── providers/               # Groq / 9Router / Ollama providers
+├── academic/
+│   ├── academic_state.py        # Canonical degree state injected into the LLM prompt
+│   ├── redundancy.py            # Completed / superseded course filtering
+│   ├── student_model.py         # Student profile (STEM, transfer, F-1)
+│   ├── course_knowledge.py      # Strategic metadata per course
+│   ├── utility_scorer.py        # Utility ranking
+│   └── constraint_validator.py  # Hard/soft schedule constraints
 ├── mypcc/
 │   ├── fetcher.py               # Playwright: MyPCC + GRAD Plan fetch
 │   └── parser.py                # HTML → PersonalContext + DegreeAudit
@@ -106,9 +115,12 @@ tests/                           # pytest unit tests
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_PROVIDER` | `groq` | `groq` or `ollama` |
+| `LLM_PROVIDER` | `groq` | `groq`, `nine_router`, or `ollama` |
 | `GROQ_API_KEY` | — | Get free at console.groq.com |
 | `GROQ_MODEL` | `llama-3.3-70b-versatile` | Groq model name |
+| `NINE_ROUTER_BASE_URL` | `http://localhost:20128/v1` | 9Router endpoint (`python scripts/start_9router.py`) |
+| `NINE_ROUTER_API_KEY` | `local` | 9Router API key |
+| `NINE_ROUTER_MODELS` | `gc/gemini-3-flash-preview,if/kimi-k2,qw/qwen3-coder-plus` | Models tried in order before Groq |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
 | `OLLAMA_LLM_MODEL` | `qwen3:4b` | Ollama model name |
 | `PCC_BASE_URL` | `https://www.pcc.edu` | PCC website base URL |
@@ -145,7 +157,8 @@ Set `GROQ_API_KEY` manually in the Render dashboard — do not commit it.
 
 ## Known Limitations
 
-- PCC `data-seats` is boolean (open/closed), not actual seat count
+- Seat counts come from PCC's capacity endpoint; if it fails, sections show only open/closed (the HTML `data-seats` attribute is boolean)
+- Schedule terms cover last year through next year; `get_current_term()` never defaults to a Winter term (pass it explicitly)
 - GRAD Plan JWT expires ~7 days — re-run `scripts/setup_session.py` to refresh
 - `search_pcc` depends on DuckDuckGo rate limits — may return empty results under heavy load
 - Schedule planner covers AAOT degree map only; other degrees may have incomplete gap analysis

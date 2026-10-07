@@ -40,6 +40,12 @@ class AgentSession:
 
 def create_demo_session() -> AgentSession:
     """Realistic demo student for portfolio / public demo — no real PCC account needed."""
+    from src.academic.academic_state import AcademicState
+    from src.schedule.fetcher import TERM_LABELS, get_in_session_term
+
+    # The term the demo student is enrolled in now (can be winter), not the planning default.
+    current_term = TERM_LABELS[get_in_session_term()]
+
     audit = DegreeAudit(
         degree="Associate of Arts Oregon Transfer (AAOT)",
         gpa="3.40",
@@ -49,7 +55,7 @@ def create_demo_session() -> AgentSession:
         requirements=[
             DegreeRequirement("Communication", "complete"),
             DegreeRequirement("Composition", "in-progress", still_needed="WR122"),
-            DegreeRequirement("College Mathematics", "incomplete", still_needed="MTH111 or higher"),
+            DegreeRequirement("College Mathematics", "in-progress", still_needed="MTH111"),
             DegreeRequirement("Health and Wellness", "incomplete", still_needed="Any PE or HE course"),
             DegreeRequirement("Arts and Letters", "incomplete", still_needed="Any AL-coded course"),
             DegreeRequirement("Social Sciences", "complete"),
@@ -71,7 +77,7 @@ def create_demo_session() -> AgentSession:
         student_name="Alex",
         degree="Associate of Arts Oregon Transfer",
         advisor="Sarah Johnson",
-        current_term="Spring 2026",
+        current_term=current_term,
         courses=[
             CourseInfo("Writing 122", "WR-122-12345", "Prof. Miller"),
             CourseInfo("College Algebra", "MTH-111-23456", "Prof. Chen"),
@@ -81,9 +87,8 @@ def create_demo_session() -> AgentSession:
         payments_received="$2,460.00",
         amount_due="$0.00",
         upcoming_dates=[
-            "Jun 9 - Summer 2026 classes begin",
-            "Jun 13 - Last day to add/drop Summer classes",
-            "Sep 22 - Fall 2026 registration opens",
+            f"{current_term} - Final exams week",
+            "Next term - Registration opens (check MyPCC for your time ticket)",
         ],
         is_international=True,
     )
@@ -94,6 +99,7 @@ def create_demo_session() -> AgentSession:
     return AgentSession(
         personal_context=ctx,
         degree_audit=audit,
+        academic_state=AcademicState.from_session(audit, current_courses=ctx.courses, is_f1=True),
         is_international=True,
         student_name="Alex",
         is_demo=True,

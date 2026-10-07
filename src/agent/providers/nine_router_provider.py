@@ -1,19 +1,20 @@
 """9Router LLM provider — OpenAI-compatible local router on localhost:20128."""
 import json
-import re
 from typing import AsyncIterator
 
 from loguru import logger
 from openai import AsyncOpenAI
 
-from src.agent.providers.base import LLMProvider
+from src.agent.providers.base import (
+    EMPTY_ANSWER,
+    PASSTHROUGH_TOOLS,
+    THINK_RE,
+    LLMProvider,
+    assistant_tool_call_message,
+    iter_words,
+)
 from src.agent.session import AgentSession
 from src.agent.tools import TOOL_DEFS
-
-_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
-
-# Tools whose raw output should bypass the LLM and be streamed directly.
-_PASSTHROUGH_TOOLS = frozenset({"build_schedule", "get_my_courses"})
 
 
 class NineRouterProvider(LLMProvider):
@@ -72,14 +73,12 @@ class NineRouterProvider(LLMProvider):
             tool_calls = choice.message.tool_calls
 
             if not tool_calls:
-                content = _THINK_RE.sub("", choice.message.content or "").strip()
-                if content:
-                    words = content.split(" ")
-                    for i, word in enumerate(words):
-                        yield word + (" " if i < len(words) - 1 else "")
+                content = THINK_RE.sub("", choice.message.content or "").strip()
+                for chunk in iter_words(content or EMPTY_ANSWER):
+                    yield chunk
                 return
 
-            messages.append(choice.message)
+            messages.append(assistant_tool_call_message(choice.message.content, tool_calls))
             logger.info(f"Iter {iteration + 1}: {[tc.function.name for tc in tool_calls]}")
 
             for tc in tool_calls:
@@ -92,7 +91,7 @@ class NineRouterProvider(LLMProvider):
                 yield f"\x00tool:{tool_name}\x00"
                 result = await self._execute_tool_with_retry(tool_name, tool_args, session)
 
-                if tool_name in _PASSTHROUGH_TOOLS:
+                if tool_name in PASSTHROUGH_TOOLS:
                     yield result
                     return
 

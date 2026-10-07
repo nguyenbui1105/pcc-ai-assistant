@@ -1,5 +1,4 @@
 """Tests for src/schedule/gap_analyzer.py"""
-import pytest
 from src.schedule.gap_analyzer import (
     analyze_gaps,
     course_to_requirement,

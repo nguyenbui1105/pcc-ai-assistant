@@ -4,42 +4,40 @@ A course is redundant if any of the following is true:
   1. DIRECT: student already completed the course (exact or normalized match)
   2. SUPERSEDED: student has a higher-level course in the same subject
      (e.g., PSY202 done → PSY101 has no incremental value)
-  3. SATURATED: the requirement this course satisfies is effectively complete
-     based on completed courses (even if GRAD Plan status hasn't updated)
+
+Requirement status is NOT re-derived here: GRAD Plan is authoritative for which
+completed courses count toward which requirement (analyze_gaps already drops
+complete ones). Re-deriving it double-counts courses across requirements
+(e.g. BI101 for Lab 1, Lab 2 and Lab 3).
 
 Usage:
   checker = RedundancyChecker.from_audit(audit)
   checker.is_redundant("PSY101")   # True if PSY202 done
   checker.redundancy_penalty("PSY101")  # 0.0-1.0 score
-  checker.effective_gaps(gaps)     # filtered gap list
+  checker.filter_redundant_subjects(gap)  # prefer uncovered disciplines
 """
 from __future__ import annotations
 
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from src.mypcc.parser import DegreeAudit
-from src.schedule.gap_analyzer import AAOT_SUBJECT_MAP, SubjectGap
+from src.schedule.gap_analyzer import SubjectGap
 from src.schedule.prereq_map import get_superseded_courses, normalize_code
 
-# Requirements satisfied by exactly 1 course (any qualifying course completes it)
-_SINGLE_COURSE_REQS = frozenset({
-    "Composition",
-    "Communication",
-    "College Mathematics",
-    "Cultural Literacy",
-    "Arts and Letters",
-    "Health and Wellness",
-})
+if TYPE_CHECKING:
+    from src.academic.academic_state import AcademicState
 
-# Requirements that need courses from N distinct subject disciplines
-_MULTI_DISCIPLINE_REQS: dict[str, int] = {
-    "Social Sciences": 2,    # need 2 different disciplines (SOC + PSY ≠ SOC + SOC)
-    "Lab Requirement 1": 1,
-    "Lab Requirement 2": 1,
-    "Lab Requirement 3": 1,
-}
+# Requirements that reward courses from disciplines the student hasn't covered yet
+# (Social Sciences: SOC + PSY, not SOC + SOC; each lab block: a new lab science)
+_MULTI_DISCIPLINE_REQS = frozenset({
+    "Social Sciences",
+    "Lab Requirement 1",
+    "Lab Requirement 2",
+    "Lab Requirement 3",
+})
 
 # How many points above a completed course number makes a lower one "superseded"
 _SUPERSEDE_GAP = 50
@@ -68,17 +66,12 @@ class RedundancyChecker:
     # e.g. {"PSY": [101, 202], "WR": [121, 122]}
     subject_levels: dict[str, list[int]] = field(default_factory=dict)
 
-    # requirement names that are effectively satisfied by completed courses
-    saturated_reqs: frozenset[str] = field(default_factory=frozenset)
-
     # courses superseded by the prereq chain (e.g., MTH95 when MTH112 done)
     _prereq_superseded: frozenset[str] = field(default_factory=frozenset)
 
     @classmethod
-    def from_state(cls, state: "AcademicState") -> "RedundancyChecker":  # type: ignore[name-defined]
+    def from_state(cls, state: AcademicState) -> RedundancyChecker:
         """Build from canonical AcademicState — preferred over from_audit."""
-        # Temporarily import here to avoid circular imports at module level
-        from src.academic.academic_state import AcademicState  # noqa: F401
         # Build a minimal audit-like structure from the state
         raw_completed = list(state.completed_all)
         completed_norm = frozenset(state.completed_all)
@@ -92,21 +85,6 @@ class RedundancyChecker:
         for levels in subject_levels.values():
             levels.sort()
 
-        saturated = set(state.complete_req_names)
-
-        for req_name, subjects in AAOT_SUBJECT_MAP.items():
-            if req_name in saturated:
-                continue
-            courses_in_req = [c for c in completed_norm if _course_subject(c) in subjects]
-            if not courses_in_req:
-                continue
-            if req_name in _SINGLE_COURSE_REQS:
-                saturated.add(req_name)
-            elif req_name in _MULTI_DISCIPLINE_REQS:
-                distinct = {_course_subject(c) for c in courses_in_req}
-                if len(distinct) >= _MULTI_DISCIPLINE_REQS[req_name]:
-                    saturated.add(req_name)
-
         try:
             prereq_superseded = frozenset(
                 normalize_code(c) for c in get_superseded_courses(raw_completed)
@@ -117,7 +95,6 @@ class RedundancyChecker:
         return cls(
             completed_norm=completed_norm,
             subject_levels=dict(subject_levels),
-            saturated_reqs=frozenset(saturated),
             _prereq_superseded=prereq_superseded,
         )
 
@@ -137,36 +114,6 @@ class RedundancyChecker:
         for levels in subject_levels.values():
             levels.sort()
 
-        # Determine effectively-saturated requirements
-        saturated = set()
-
-        # Also mark requirements whose status is already "complete" in the audit
-        for req in (audit.requirements or []):
-            if req.status == "complete":
-                saturated.add(req.name)
-
-        for req_name, subjects in AAOT_SUBJECT_MAP.items():
-            if req_name in saturated:
-                continue  # already marked complete
-
-            # Collect completed courses that fall under this requirement's subjects
-            courses_in_req = [
-                c for c in completed_norm
-                if _course_subject(c) in subjects
-            ]
-            if not courses_in_req:
-                continue
-
-            if req_name in _SINGLE_COURSE_REQS:
-                # Any completion in the subject family satisfies it
-                saturated.add(req_name)
-
-            elif req_name in _MULTI_DISCIPLINE_REQS:
-                required_disciplines = _MULTI_DISCIPLINE_REQS[req_name]
-                distinct_disciplines = {_course_subject(c) for c in courses_in_req}
-                if len(distinct_disciplines) >= required_disciplines:
-                    saturated.add(req_name)
-
         # Build the prereq-chain superseded set using the static PREREQS graph
         # e.g., if MTH112 is done → get_superseded_courses returns MTH95, MTH65
         try:
@@ -179,7 +126,6 @@ class RedundancyChecker:
         return cls(
             completed_norm=completed_norm,
             subject_levels=dict(subject_levels),
-            saturated_reqs=frozenset(saturated),
             _prereq_superseded=prereq_superseded,
         )
 
@@ -218,10 +164,6 @@ class RedundancyChecker:
         """True if this course is directly completed or superseded."""
         return self.is_completed(course_code) or self.is_superseded(course_code)
 
-    def is_requirement_saturated(self, req_name: str) -> bool:
-        """True if this requirement is effectively complete based on completed courses."""
-        return req_name in self.saturated_reqs
-
     def redundancy_penalty(self, course_code: str) -> float:
         """Return 0.0 (no penalty) to 1.0 (fully redundant).
 
@@ -245,35 +187,22 @@ class RedundancyChecker:
                 return min(0.70, gap / 200.0)
         return 0.0
 
-    def effective_gaps(self, gaps: list[SubjectGap]) -> list[SubjectGap]:
-        """Filter out requirements that are effectively satisfied by completed courses.
-
-        This is more conservative than analyze_gaps (which only uses GRAD Plan status).
-        Removes requirements where completed courses already satisfy the need,
-        preventing unnecessary recommendations of PSY101 when SOC204+GEO105 done.
-        """
-        return [g for g in gaps if not self.is_requirement_saturated(g.requirement)]
-
     def filter_redundant_subjects(
         self, gap: SubjectGap
     ) -> list[str]:
-        """Return only the subjects in this gap that still need more courses.
+        """Return the subjects in this gap worth recommending, preferring new disciplines.
 
         For Social Sciences: if student already has SOC (sociology), skip SOC
         and only recommend different-discipline subjects like PSY, EC, etc.
+        The gap is still open in GRAD Plan, so when every subject is already
+        covered all of them are returned rather than none.
         """
         if gap.requirement not in _MULTI_DISCIPLINE_REQS:
             return gap.subjects
 
-        needed_disciplines = _MULTI_DISCIPLINE_REQS[gap.requirement]
-        all_in_req = [
-            c for c in self.completed_norm
+        covered_disciplines = {
+            _course_subject(c) for c in self.completed_norm
             if _course_subject(c) in gap.subjects
-        ]
-        covered_disciplines = {_course_subject(c) for c in all_in_req}
-
-        if len(covered_disciplines) >= needed_disciplines:
-            return []  # fully satisfied
-
-        # Return subjects NOT already covered (different disciplines needed)
-        return [s for s in gap.subjects if s not in covered_disciplines]
+        }
+        uncovered = [s for s in gap.subjects if s not in covered_disciplines]
+        return uncovered or gap.subjects

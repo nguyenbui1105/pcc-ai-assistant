@@ -10,23 +10,22 @@ from src.agent.session import AgentSession, create_demo_session
 from src.mypcc.fetcher import (
     fetch_degree_audit_async,
     fetch_personal_context_async,
-    fetch_banss_schedule_async,
     fetch_enrolled_times_async,
     SessionExpiredError,
 )
-from src.mypcc.parser import parse, parse_degree_audit, parse_banss_events, _course_id_to_code
-from src.schedule.fetcher import TERM_CODES, TERM_LABELS
+from src.mypcc.parser import parse, parse_degree_audit, _course_id_to_code
+from src.schedule.fetcher import TERM_LABELS, get_current_term
 from src.agent.query_logger import QueryLogger
 
 _COOKIES_PATH = "./data/mypcc_cookies.json"
 _GRADPLAN_COOKIES_PATH = "./data/gradplan_cookies.json"
-_BANSS_COOKIES_PATH = "./data/banss_cookies.json"
 _query_logger = QueryLogger()
 
 _TOOL_LABELS = {
     "get_my_courses": "Fetching your courses...",
     "get_degree_progress": "Checking degree progress...",
     "get_my_finances": "Fetching financial info...",
+    "recommend_courses": "Finding course recommendations...",
     "find_courses": "Searching PCC schedule...",
     "build_schedule": "Building your schedule...",
     "search_pcc": "Searching PCC website...",
@@ -151,6 +150,7 @@ async def on_start():
         cl.user_session.set("agent_session", session)
         logger.info(f"Demo mode activated: {reason}")
         reason_note = _DEMO_REASON_MESSAGES.get(reason, _DEMO_REASON_MESSAGES["error"])
+        term_label = TERM_LABELS[get_current_term()]
         await cl.Message(
             content=(
                 "Hi! I'm your PCC Assistant — running in **Demo Mode**.\n\n"
@@ -158,8 +158,8 @@ async def on_start():
                 "Try asking:\n"
                 "- *What courses am I taking this term?*\n"
                 "- *What do I still need to graduate?*\n"
-                "- *Find me open Chemistry classes for Summer 2026*\n"
-                "- *Build me a 12-credit schedule for Fall 2026*"
+                f"- *Find me open Chemistry classes for {term_label}*\n"
+                f"- *Build me a 12-credit schedule for {term_label}*"
             )
         ).send()
 

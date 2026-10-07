@@ -24,8 +24,10 @@ Tags (used for filtering and scoring):
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import FrozenSet
+
+from src.schedule.prereq_map import normalize_code
 
 
 @dataclass(frozen=True)
@@ -146,12 +148,14 @@ COURSE_KB: dict[str, CourseMetadata] = {
     "MTH95":  _meta({"stem","foundational","transfer_core"},         transfer=0.60, stem=0.70, cs=0.55, unlock=0.85, workload=0.50),
     "MTH111": _meta({"stem","foundational","cs_pathway","transfer_core"}, transfer=0.85, stem=0.82, cs=0.75, unlock=0.90, workload=0.60),
     "MTH112": _meta({"stem","foundational","cs_pathway","transfer_core"}, transfer=0.87, stem=0.85, cs=0.78, unlock=0.92, workload=0.65),
-    "MTH211": _meta({"stem","foundational","cs_pathway","transfer_core","high_workload"}, transfer=0.93, stem=0.92, cs=0.88, unlock=0.95, workload=0.80),
-    "MTH212": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.93, stem=0.92, cs=0.88, unlock=0.90, workload=0.82),
-    "MTH213": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.93, stem=0.92, cs=0.88, unlock=0.85, workload=0.82),
+    # MTH211-213 = Foundations of Elementary Mathematics (for future teachers), not a CS/calculus track
+    "MTH211": _meta({"stem","transfer_core"},                        transfer=0.70, stem=0.55, cs=0.10, unlock=0.35, workload=0.55),
+    "MTH212": _meta({"stem","transfer_core"},                        transfer=0.70, stem=0.55, cs=0.10, unlock=0.30, workload=0.55),
+    "MTH213": _meta({"stem","transfer_core"},                        transfer=0.70, stem=0.55, cs=0.10, unlock=0.25, workload=0.55),
     "MTH243": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.90, stem=0.90, cs=0.80, unlock=0.75, workload=0.78),
     "MTH244": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.90, stem=0.90, cs=0.80, unlock=0.70, workload=0.78),
     "MTH261": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.90, stem=0.90, cs=0.85, unlock=0.70, workload=0.80),
+    "MTH251": _meta({"stem","foundational","cs_pathway","transfer_core","high_workload"}, transfer=0.93, stem=0.93, cs=0.88, unlock=0.95, workload=0.80),
     "MTH252": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.92, stem=0.92, cs=0.85, unlock=0.85, workload=0.80),
     "MTH253": _meta({"stem","cs_pathway","transfer_core","high_workload"}, transfer=0.92, stem=0.92, cs=0.85, unlock=0.80, workload=0.80),
 
@@ -228,9 +232,10 @@ _SUBJECT_DEFAULTS: dict[str, tuple[float, float, float, float, set[str]]] = {
 _SUPPORT_LAB_PATTERN = re.compile(
     r"""
     (?:
-        ^WR\d+[LXBCZ]\d*$        |  # WR199B, WR121L, WR115X, WR121Z support labs
-        ^[A-Z]+\d+[XZ]\d*$       |  # PE100X, PE120Z activity variants
-        ^MTH\d+[HBZ]$            |  # MTH65H bridge/support courses
+        ^WR\d+[LXBC]\d*$         |  # WR199B, WR121L, WR115X support labs
+        ^[A-Z]+\d+X\d*$          |  # PE100X activity variants
+        ^MTH\d+[HB]$             |  # MTH65H bridge/support courses
+        ^[A-Z]+\d{1,2}[A-Z]?$     |  # numbered below 100 (MTH20): pre-college, no AAOT credit
         ^WR115$                   |  # developmental writing (always support)
         ^WR1[3-9]\d[A-Z]?$          # WR130-199 = developmental/support writing range
     )
@@ -248,11 +253,13 @@ def get_course_metadata(course_code: str) -> CourseMetadata:
     3. Subject-level heuristics from _SUBJECT_DEFAULTS
     4. Generic low-utility default
     """
-    code = course_code.upper().replace(" ", "")
+    code = normalize_code(course_code.replace(" ", ""))
 
-    # 1. Exact match
-    if code in COURSE_KB:
-        return COURSE_KB[code]
+    # 1. Exact match. Oregon common course numbering adds a trailing "Z"
+    #    (WR122Z, MTH111Z): it is the same course as the unsuffixed code.
+    for key in (code, re.sub(r"(?<=\d)Z$", "", code)):
+        if key in COURSE_KB:
+            return COURSE_KB[key]
 
     # 2. Support lab / low-value variant detection
     if _SUPPORT_LAB_PATTERN.match(code):

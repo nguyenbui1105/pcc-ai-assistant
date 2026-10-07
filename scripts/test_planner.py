@@ -7,6 +7,7 @@ logger.remove()
 from src.schedule.prereq_map import get_superseded_courses, get_missing_prereqs
 from src.mypcc.parser import DegreeAudit, DegreeRequirement, _course_id_to_code
 from src.agent.schedule_planner import plan_schedule_async
+from src.schedule.fetcher import get_current_term
 
 # ── Unit tests ───────────────────────────────────────────────────────────────
 s1 = get_superseded_courses(["WR121"])
@@ -49,7 +50,7 @@ audit = DegreeAudit(
 )
 
 result = asyncio.run(
-    plan_schedule_async(audit, "9 credits, online only", term="summer2026")
+    plan_schedule_async(audit, "9 credits, online only", term=get_current_term())
 )
 print(result)
 print()

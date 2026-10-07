@@ -4,15 +4,19 @@ Each tool wraps existing src/* functions and returns a plain string for the LLM.
 """
 import json
 import re
-from typing import Any
 
 import httpx
 from bs4 import BeautifulSoup
 from loguru import logger
 
 from src.agent.session import AgentSession
-from src.schedule.fetcher import get_current_term
-from src.schedule.prereq_map import PREREQS
+from src.schedule.fetcher import TERM_CODES, TERM_LABELS, resolve_term
+from src.schedule.prereq_map import PREREQS, get_missing_prereqs, normalize_code
+
+_TERM_PARAM_DESC = (
+    f"Term key in the form <season><year>, one of: {', '.join(TERM_CODES)}. "
+    "Omit to use the current term."
+)
 
 # ── Tool definitions (Ollama/OpenAI format) ───────────────────────────────────
 
@@ -67,7 +71,7 @@ TOOL_DEFS: list[dict] = [
                 "properties": {
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit for current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                     "profile_hints": {
                         "type": "string",
@@ -98,7 +102,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                 },
                 "required": ["subjects"],
@@ -126,7 +130,7 @@ TOOL_DEFS: list[dict] = [
                     },
                     "term": {
                         "type": "string",
-                        "description": "Term key: summer2026, fall2026, spring2027. Omit to use the current term.",
+                        "description": _TERM_PARAM_DESC,
                     },
                     "excluded_courses": {
                         "type": "array",
@@ -205,6 +209,29 @@ TOOL_DEFS: list[dict] = [
 
 # ── Tool implementations ───────────────────────────────────────────────────────
 
+# Same notice the DEMO MODE system prompt asks for. get_my_courses is a passthrough
+# tool (the LLM never sees its output), so the tool has to add the notice itself.
+_DEMO_NOTICE = "> 📌 **Demo data** — this is a sample profile, not your real PCC account."
+
+
+def _student_course_sets(session: AgentSession) -> tuple[set[str], set[str]]:
+    """(completed, in_progress) as normalized course codes.
+
+    Sessions append current enrollments to degree_audit.completed_courses so the
+    planners filter them out; AcademicState keeps the two apart, so prefer it.
+    """
+    if session.academic_state is not None:
+        return set(session.academic_state.completed), set(session.academic_state.in_progress)
+    from src.mypcc.parser import _course_id_to_code
+    in_progress = {
+        normalize_code(code)
+        for c in session.personal_context.courses
+        if (code := _course_id_to_code(c.course_id))
+    }
+    completed = {normalize_code(c) for c in session.degree_audit.completed_courses} - in_progress
+    return completed, in_progress
+
+
 def _tool_get_my_courses(session: AgentSession) -> str:
     ctx = session.personal_context
     if not ctx.courses:
@@ -212,7 +239,10 @@ def _tool_get_my_courses(session: AgentSession) -> str:
             return "MyPCC session expired. Please run `python scripts/setup_session.py` to refresh."
         return "No enrolled courses found for the current term."
 
-    lines = [f"**Your courses — {ctx.current_term}**\n"]
+    if session.is_demo:
+        lines = [_DEMO_NOTICE, "", f"**Demo student's courses — {ctx.current_term}**\n"]
+    else:
+        lines = [f"**Your courses — {ctx.current_term}**\n"]
     for c in ctx.courses:
         crn = c.course_id.split("-")[-1] if "-" in c.course_id else ""
         time_str = session.enrolled_times.get(crn, "")
@@ -238,14 +268,19 @@ def _tool_get_degree_progress(session: AgentSession) -> str:
         "Requirements:",
     ]
     for r in audit.requirements:
-        icon = {"complete": "✓", "in-progress": "⏳", "incomplete": "✗"}.get(r.status, "?")
-        line = f"  {icon} {r.name}: {r.status.upper()}"
+        # GRAD Plan says "in-progress"; AcademicState's canonical form is "in_progress"
+        icon = {"complete": "✓", "in-progress": "⏳", "in_progress": "⏳", "incomplete": "✗"}.get(r.status, "?")
+        line = f"  {icon} {r.name}: {r.status.replace('_', '-').upper()}"
         if r.still_needed:
             line += f" — still needed: {r.still_needed}"
         lines.append(line)
 
+    # In-progress courses are listed on their own, not as completed
+    completed, in_progress = _student_course_sets(session)
     lines.append("")
-    lines.append(f"Completed courses ({len(audit.completed_courses)}): {', '.join(audit.completed_courses)}")
+    lines.append(f"Completed courses ({len(completed)}): {', '.join(sorted(completed))}")
+    if in_progress:
+        lines.append(f"In progress this term ({len(in_progress)}): {', '.join(sorted(in_progress))}")
     return "\n".join(lines)
 
 
@@ -269,15 +304,33 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
     from src.schedule.parser import parse_detail_html, parse_listing_html
 
     subjects = [s.upper() for s in subjects[:6]]
+    if not subjects:
+        return "Please give at least one PCC subject code, e.g. CS or MTH."
     completed = set(session.degree_audit.completed_courses)
+    term_label = TERM_LABELS.get(term, term)
 
     listing_html = await fetch_listings_async(subjects, term)
 
     to_fetch = []
     subject_courses: dict[str, list] = {}
+    # Why a subject produced nothing: an empty listing doesn't mean "already completed"
+    empty_notes: dict[str, str] = {}
     for subj in subjects:
-        courses = parse_listing_html(listing_html.get(subj, ""), subj)
+        html = listing_html.get(subj, "")
+        courses = parse_listing_html(html, subj)
         filtered = [c for c in courses if not _is_completed(c.course_code, completed)]
+        if not html:
+            empty_notes[subj] = (
+                f"Could not load the PCC schedule for {subj} in {term_label} "
+                "(it may not be posted yet, or pcc.edu is unavailable)."
+            )
+        elif not courses:
+            empty_notes[subj] = (
+                f"No {subj} courses are listed for {term_label} "
+                "(check the subject code; the schedule may not be posted yet)."
+            )
+        elif not filtered:
+            empty_notes[subj] = f"All {subj} courses listed for {term_label} are already completed or in progress."
         # Sort by course number, pick top 3
         filtered.sort(key=lambda c: int(re.search(r"\d+", c.course_code).group() or 999))
         subject_courses[subj] = filtered[:3]
@@ -285,9 +338,10 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
 
     urls = [c.detail_url for c in to_fetch if c.detail_url]
     if not urls:
-        return f"No new courses found for {subjects} in {term}. All may already be completed."
+        return "\n".join(empty_notes.values()) or (
+            f"No course details found for {', '.join(subjects)} in {term_label}."
+        )
 
-    url_to_info = {c.detail_url: c for c in to_fetch if c.detail_url}
     html_map = await fetch_details_async(urls[:12])
 
     # Collect all sections then enrich with real seat counts
@@ -303,7 +357,7 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
         capacity = await fetch_capacity_async(crns, term)
         _merge_capacity(all_flat, capacity)
 
-    lines: list[str] = [f"Available courses for {term}:"]
+    lines: list[str] = [f"Available courses for {term_label}:"]
     found_any = False
 
     for subj in subjects:
@@ -334,8 +388,14 @@ async def _tool_find_courses(subjects: list[str], term: str, session: AgentSessi
             found_any = True
 
     if not found_any:
-        return f"No open sections found for {subjects} in {term}. Schedule may not be posted yet."
+        return "\n".join([
+            f"No open sections found for {', '.join(subjects)} in {term_label}. Schedule may not be posted yet.",
+            *empty_notes.values(),
+        ])
 
+    if empty_notes:
+        lines.append("")
+        lines.extend(empty_notes.values())
     return "\n".join(lines)
 
 
@@ -371,10 +431,34 @@ async def _tool_build_schedule(
     )
 
 
-async def _fetch_page_text(url: str, char_limit: int = 3000) -> str:
-    """Fetch a PCC page and return clean text content."""
+def _is_pcc_url(url: str) -> bool:
+    """True for an http(s) URL whose host is pcc.edu or a subdomain of it.
+
+    Parsed with httpx.URL, the parser the request itself uses, so the check and the
+    fetch agree on the host ('http://10.0.0.1/?pcc.edu', 'pcc.edu.evil.net' fail).
+    """
     try:
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        parsed = httpx.URL(url)
+    except Exception:
+        return False
+    host = parsed.host.lower().rstrip(".")
+    return parsed.scheme in ("http", "https") and (host == "pcc.edu" or host.endswith(".pcc.edu"))
+
+
+async def _require_pcc_host(request: httpx.Request) -> None:
+    """httpx request hook: runs before every hop, so a redirect off pcc.edu is never followed."""
+    if not _is_pcc_url(str(request.url)):
+        raise httpx.InvalidURL(f"Refusing to fetch non-pcc.edu URL: {request.url}")
+
+
+async def _fetch_page_text(url: str, char_limit: int = 3000, pcc_only: bool = False) -> str:
+    """Fetch a PCC page and return clean text content.
+
+    pcc_only: fetch nothing unless the URL and every redirect target are on pcc.edu.
+    """
+    hooks = {"request": [_require_pcc_host]} if pcc_only else {}
+    try:
+        async with httpx.AsyncClient(timeout=10, follow_redirects=True, event_hooks=hooks) as client:
             resp = await client.get(
                 url,
                 headers={"User-Agent": "Mozilla/5.0 (compatible; PCC-Assistant/1.0)"},
@@ -455,37 +539,83 @@ async def _tool_search_pcc(query: str) -> str:
 
 async def _tool_get_pcc_page(url: str) -> str:
     """Fetch and return the content of a specific PCC page URL."""
-    if "pcc.edu" not in url:
+    if not _is_pcc_url(url):
         return "Only pcc.edu pages are supported."
-    text = await _fetch_page_text(url, char_limit=4000)
+    text = await _fetch_page_text(url, char_limit=4000, pcc_only=True)
     if text:
         return f"Content from {url}:\n\n{text}"
     return f"Could not fetch content from {url}. Try opening it directly in a browser."
 
 
 def _tool_check_prerequisites(course_code: str, session: AgentSession) -> str:
-    code = course_code.upper().replace(" ", "")
-    prereqs = PREREQS.get(code, [])
-    completed = set(session.degree_audit.completed_courses)
+    # 'mth 95', 'WR-122' or a MyPCC ID 'WR-122-12345' → drop a trailing CRN and separators
+    code = re.sub(r"[\s-]+\d{5}$", "", course_code.strip())
+    code = normalize_code(re.sub(r"[\s-]+", "", code))
+    if not code:
+        return "Please give a course code, e.g. MTH111."
 
+    prereq_map = {normalize_code(k): [normalize_code(p) for p in v] for k, v in PREREQS.items()}
+    completed, in_progress = _student_course_sets(session)
+
+    lines: list[str] = []
+    if code in completed:
+        lines.append(f"Note: {code} is already completed.")
+    elif code in in_progress:
+        lines.append(f"Note: {code} is in progress this term.")
+
+    # A missing key means unknown; only an empty list means "no prerequisites"
+    if code not in prereq_map:
+        lines.append(
+            f"No prerequisite data for {code} — check the PCC catalog "
+            "(https://www.pcc.edu/courses/) or ask an advisor before enrolling."
+        )
+        return "\n".join(lines)
+    prereqs = prereq_map[code]
     if not prereqs:
-        return f"{code} has no listed prerequisites — you can enroll directly."
+        lines.append(f"{code} has no listed prerequisites — you can enroll directly.")
+        return "\n".join(lines)
 
-    met, unmet = [], []
-    for p in prereqs:
-        (met if p in completed else unmet).append(p)
+    unmet = get_missing_prereqs(code, sorted(completed | in_progress))
+    # Prereqs met only thanks to a course the student is taking this term
+    unmet_without_ip = get_missing_prereqs(code, sorted(completed))
+    met = [p for p in prereqs if p not in unmet_without_ip]
+    met_ip = [p for p in prereqs if p in unmet_without_ip and p not in unmet]
 
-    lines = [f"Prerequisites for {code}: {', '.join(prereqs)}"]
+    lines.append(f"Prerequisites for {code}: {', '.join(prereqs)}")
     if met:
         lines.append(f"  ✓ Met: {', '.join(met)}")
+    if met_ip:
+        lines.append(f"  ⏳ In progress this term (met once passed): {', '.join(met_ip)}")
     if unmet:
         lines.append(f"  ✗ Still needed: {', '.join(unmet)}")
     if not unmet:
-        lines.append("  → You meet all prerequisites.")
+        lines.append(
+            "  → You will meet all prerequisites once your in-progress courses are passed."
+            if met_ip else "  → You meet all prerequisites."
+        )
     return "\n".join(lines)
 
 
 # ── Executor ──────────────────────────────────────────────────────────────────
+
+def _as_list(value, sep: str = r"[,;]") -> list[str]:
+    """Coerce an array argument the model sent as a string into a list of strings.
+
+    Ollama and 9Router don't validate arguments against the schema, so 'CS',
+    'CS, MTH' or '["CS"]' can arrive as a string and would be iterated per character.
+    """
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = None
+        value = parsed if isinstance(parsed, list) else re.split(sep, value)
+    elif not isinstance(value, (list, tuple)):
+        value = [value]
+    return [str(v).strip() for v in value if str(v).strip()]
+
 
 async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
     logger.info(f"[tool] {name}({args})")
@@ -499,22 +629,23 @@ async def execute_tool(name: str, args: dict, session: AgentSession) -> str:
                 return _tool_get_my_finances(session)
             case "recommend_courses":
                 return await _tool_recommend_courses(
-                    args.get("term", ""),
+                    resolve_term(args.get("term")),
                     args.get("profile_hints", ""),
                     session,
                 )
             case "find_courses":
                 return await _tool_find_courses(
-                    args.get("subjects", []),
-                    args.get("term") or get_current_term(),
+                    # Subject codes never contain spaces, so 'CS MTH' is two subjects
+                    _as_list(args.get("subjects"), sep=r"[\s,;]"),
+                    resolve_term(args.get("term")),
                     session,
                 )
             case "build_schedule":
                 return await _tool_build_schedule(
                     args.get("preferences", ""),
-                    args.get("term") or get_current_term(),
+                    resolve_term(args.get("term")),
                     session,
-                    excluded_courses=args.get("excluded_courses"),
+                    excluded_courses=_as_list(args.get("excluded_courses")),
                 )
             case "search_pcc":
                 return await _tool_search_pcc(args.get("query", ""))

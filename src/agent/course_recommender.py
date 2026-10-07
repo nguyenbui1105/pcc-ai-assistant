@@ -10,11 +10,9 @@ Pipeline:
 """
 import asyncio
 import re
-from collections import defaultdict
 
 from loguru import logger
 
-from src.academic.course_knowledge import get_course_metadata
 from src.academic.redundancy import RedundancyChecker
 from src.academic.student_model import StudentProfile, enrich_profile_from_text, infer_profile
 from src.academic.utility_scorer import is_high_priority_gap, rank_courses_for_display, score_course
@@ -22,6 +20,7 @@ from src.mypcc.parser import DegreeAudit
 from src.schedule.fetcher import TERM_LABELS, fetch_details_async, fetch_listings_async
 from src.schedule.gap_analyzer import SubjectGap, analyze_gaps, get_unique_subjects
 from src.schedule.parser import CourseInfo, CourseSection, parse_detail_html, parse_listing_html
+from src.schedule.prereq_map import get_missing_prereqs
 
 # Max course detail pages per subject (performance limit)
 _MAX_COURSES_TO_FETCH = 5
@@ -51,27 +50,42 @@ def _select_courses_for_fetch(
     courses: list[CourseInfo],
     profile: StudentProfile,
     max_n: int,
+    completed: set[str] | frozenset[str] = frozenset(),
+    checker: "RedundancyChecker | None" = None,
 ) -> list[CourseInfo]:
     """Select courses to fetch, ordered by utility score (best-first).
 
     Unlike the old approach (just lowest course number), this prefers
     courses with higher strategic value for the student's profile.
+    Completed/superseded courses and courses whose prerequisites aren't met
+    (completed includes in-progress) are skipped, so the fetch budget goes to
+    courses the student can take next (MTH112 after MTH111, not MTH211).
     """
     def _sort_key(ci: CourseInfo) -> float:
         s, _ = score_course(ci.course_code, profile)
         return -s  # negate for ascending sort (highest score first)
 
-    return sorted(courses, key=_sort_key)[:max_n]
+    eligible = [
+        ci for ci in courses
+        if not (checker and checker.is_redundant(ci.course_code))
+        and not _is_completed(ci.course_code, completed)
+        and not get_missing_prereqs(ci.course_code, list(completed))
+    ]
+    return sorted(eligible, key=_sort_key)[:max_n]
 
 
 async def _fetch_all_details(
     subject_courses: dict[str, list[CourseInfo]],
     profile: StudentProfile,
+    completed: set[str] | frozenset[str] = frozenset(),
+    checker: "RedundancyChecker | None" = None,
 ) -> dict[str, list[CourseSection]]:
     """Fetch detail pages for selected courses, prioritizing by utility score."""
     to_fetch: list[CourseInfo] = []
     for courses in subject_courses.values():
-        to_fetch.extend(_select_courses_for_fetch(courses, profile, _MAX_COURSES_TO_FETCH))
+        to_fetch.extend(_select_courses_for_fetch(
+            courses, profile, _MAX_COURSES_TO_FETCH, completed, checker
+        ))
 
     urls = [ci.detail_url for ci in to_fetch if ci.detail_url]
     url_to_info: dict[str, CourseInfo] = {ci.detail_url: ci for ci in to_fetch}
@@ -97,7 +111,7 @@ def _format_gap_block(
     checker: "RedundancyChecker | None" = None,
 ) -> str:
     """Format one requirement block with utility-ranked courses + WHY explanations."""
-    high_priority = is_high_priority_gap(gap.label, profile)
+    high_priority = is_high_priority_gap(gap.requirement, profile)
     priority_badge = " 🔴 **HIGH PRIORITY**" if high_priority else ""
 
     header = f"**{gap.label}**{priority_badge}"
@@ -106,27 +120,37 @@ def _format_gap_block(
 
     lines: list[str] = [header]
 
-    # Determine which subjects still need courses (handles multi-discipline reqs)
+    # Prefer disciplines the student hasn't covered yet (multi-discipline reqs)
     active_subjects = (
         checker.filter_redundant_subjects(gap)
         if checker else gap.subjects
     )
-    if not active_subjects:
-        lines.append("  _Requirements already satisfied by completed courses._")
-        return "\n".join(lines)
 
     # Collect available courses — only from subjects still needed
     candidate_courses: list[CourseInfo] = []
+    needs_prereqs: list[str] = []
     for subj in active_subjects:
         for course in subject_courses.get(subj, []):
             # Skip if directly completed or superseded by higher-level course
             if checker and checker.is_redundant(course.course_code):
                 continue
-            if not _is_completed(course.course_code, completed):
-                candidate_courses.append(course)
+            if _is_completed(course.course_code, completed):
+                continue
+            # Not eligible yet: a prerequisite is neither completed nor in progress
+            missing = get_missing_prereqs(course.course_code, list(completed))
+            if missing:
+                needs_prereqs.append(f"{course.course_code} (needs {', '.join(missing)})")
+                continue
+            candidate_courses.append(course)
 
     if not candidate_courses:
-        lines.append("  _No courses available for this requirement this term._")
+        if needs_prereqs:
+            lines.append(
+                "  _No courses you're eligible for yet. Prerequisites first: "
+                f"{'; '.join(needs_prereqs[:3])}._"
+            )
+        else:
+            lines.append("  _No courses available for this requirement this term._")
         return "\n".join(lines)
 
     # Score and rank all candidate courses
@@ -139,7 +163,6 @@ def _format_gap_block(
         above = ranked  # fallback: show something
 
     courses_shown = 0
-    has_low_score_suppressed = False
 
     for course_code, utility_score, reasons in above:
         if courses_shown >= _MAX_COURSES_SHOWN:
@@ -193,6 +216,60 @@ def _is_aaot_degree(degree: str) -> bool:
     return any(kw in degree.upper() for kw in ["AAOT", "OREGON TRANSFER", "ASSOCIATE OF ARTS OREGON"])
 
 
+def _no_gaps_message(audit: DegreeAudit) -> str:
+    """Reply when no requirement block needs new courses.
+
+    Congratulates only when the audit is really done: GRAD Plan says COMPLETE,
+    or no credits are short and no tracked requirement (including unmapped ones
+    such as "AAOT Credit Total") is still open.
+    """
+    if not _is_aaot_degree(audit.degree):
+        return (
+            f"Automatic course recommendations work best for AAOT degrees. "
+            f"Your degree (**{audit.degree}**) may not be fully supported.\n\n"
+            f"**Known progress:** {audit.credits_applied}/{audit.credits_required} credits "
+            f"| GPA {audit.gpa}\n\n"
+            f"Please consult your advisor, or use **find_courses** to search for "
+            f"specific subjects directly."
+        )
+
+    credits_left = max(0, audit.credits_required - audit.credits_applied)
+    open_reqs = [r for r in audit.requirements if r.status != "complete"]
+    audit_open = audit.status.upper() in ("INCOMPLETE", "IN-PROGRESS")
+    if audit.status.upper() == "COMPLETE" or not (audit_open or credits_left or open_reqs):
+        return (
+            "Your degree audit shows all AAOT requirements are **complete** — "
+            "congratulations! Double-check at "
+            "[GRAD Plan](https://gradplan.pcc.edu) for final confirmation."
+        )
+
+    in_progress = [r for r in open_reqs if r.status.replace("-", "_") == "in_progress"]
+    still_open = [r for r in open_reqs if r not in in_progress]
+    lines = [
+        "Your AAOT requirement areas are complete or in progress, but your degree "
+        "is **not finished yet**.",
+        "",
+        f"**Progress:** {audit.credits_applied}/{audit.credits_required} credits "
+        f"({credits_left} still needed) | GPA {audit.gpa}",
+    ]
+    if in_progress:
+        lines.append(
+            f"**In progress this term:** {', '.join(r.name for r in in_progress)} — "
+            "should be complete once your current classes are finished."
+        )
+    if still_open:
+        lines.append("**Still open:** " + "; ".join(
+            f"{r.name} — {r.still_needed}" if r.still_needed else r.name for r in still_open
+        ))
+    lines += [
+        "",
+        "Remaining credits can come from any transferable college-level course. "
+        "Tell me your interests for suggestions, or use **find_courses** to search "
+        "a subject. Confirm at [GRAD Plan](https://gradplan.pcc.edu).",
+    ]
+    return "\n".join(lines)
+
+
 async def recommend_courses_async(
     audit: DegreeAudit,
     term: str | None = None,
@@ -209,6 +286,13 @@ async def recommend_courses_async(
     if term is None:
         from src.schedule.fetcher import get_current_term
         term = get_current_term()
+
+    # Requirements GRAD Plan reports as in progress will be completed by the
+    # student's current classes, so they get no new recommendations. Read from the
+    # GRAD Plan audit itself, before it is replaced by the AcademicState view below.
+    grad_in_progress = {
+        r.name for r in audit.requirements if r.status.replace("-", "_") == "in_progress"
+    }
 
     # Build student profile
     profile = infer_profile(audit, is_f1=is_f1)
@@ -234,41 +318,21 @@ async def recommend_courses_async(
         )
 
     gaps = analyze_gaps(audit)
+    in_progress_gaps = [g for g in gaps if g.requirement in grad_in_progress]
+    gaps = [g for g in gaps if g.requirement not in grad_in_progress]
     if not gaps:
-        if _is_aaot_degree(audit.degree):
-            return (
-                "Your degree audit shows all AAOT requirements are **complete** — "
-                "congratulations! Double-check at "
-                "[GRAD Plan](https://gradplan.pcc.edu) for final confirmation."
-            )
-        return (
-            f"Automatic course recommendations work best for AAOT degrees. "
-            f"Your degree (**{audit.degree}**) may not be fully supported.\n\n"
-            f"**Known progress:** {audit.credits_applied}/{audit.credits_required} credits "
-            f"| GPA {audit.gpa}\n\n"
-            f"Please consult your advisor, or use **find_courses** to search for "
-            f"specific subjects directly."
-        )
+        return _no_gaps_message(audit)
 
-    # Build redundancy checker — filters completed/superseded/saturated courses
+    # Build redundancy checker — filters completed/superseded courses
     checker = (
         RedundancyChecker.from_state(academic_state)
         if academic_state is not None
         else RedundancyChecker.from_audit(audit)
     )
 
-    # Filter out requirements effectively satisfied by completed courses
-    gaps = checker.effective_gaps(gaps)
-    if not gaps:
-        return (
-            "Your AAOT requirements appear to be effectively satisfied by your "
-            "completed courses — congratulations! Confirm at "
-            "[GRAD Plan](https://gradplan.pcc.edu)."
-        )
-
     # Sort gaps: HIGH-PRIORITY first, then alphabetical by label
     def _gap_sort_key(g: SubjectGap) -> tuple[int, str]:
-        hp = 0 if is_high_priority_gap(g.label, profile) else 1
+        hp = 0 if is_high_priority_gap(g.requirement, profile) else 1
         return (hp, g.label)
 
     gaps_sorted = sorted(gaps, key=_gap_sort_key)
@@ -286,7 +350,8 @@ async def recommend_courses_async(
         subject_courses[subj] = parse_listing_html(listing_html.get(subj, ""), subj)
         logger.debug(f"  {subj}: {len(subject_courses[subj])} courses listed")
 
-    section_map = await _fetch_all_details(subject_courses, profile)
+    completed_set = set(audit.completed_courses)
+    section_map = await _fetch_all_details(subject_courses, profile, completed_set, checker)
 
     # Header
     stem_note = ""
@@ -304,11 +369,15 @@ async def recommend_courses_async(
         "_Courses ranked by strategic value for your profile. "
         "★★★ = highest priority, ★ = lower priority._",
         "",
-        "---",
-        "",
     ]
+    if in_progress_gaps:
+        lines += [
+            "_In progress this term (your current classes should complete these): "
+            f"{', '.join(g.label for g in in_progress_gaps)}._",
+            "",
+        ]
+    lines += ["---", ""]
 
-    completed_set = set(audit.completed_courses)
     for gap in gaps_sorted:
         lines.append(_format_gap_block(gap, subject_courses, section_map, completed_set, profile, checker))
         lines.append("")

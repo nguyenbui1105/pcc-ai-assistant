@@ -6,8 +6,9 @@ from loguru import logger
 
 _CRN_DIGIT_RE = re.compile(r"^\d{5}$")
 # Matches PCC format "from 9:30 - to 11:50am" or standard "9:30am - 11:50am"
+# (the start's am/pm is only printed when it differs from the end's: "from 11am - to 12:50pm")
 _TIME_RANGE_RE = re.compile(
-    r"(?:from\s+)?(\d{1,2}(?::\d{2})?)\s*(?:am|pm)?\s*[-–]\s*(?:to\s+)?(\d{1,2}(?::\d{2})?)\s*(am|pm)",
+    r"(?:from\s+)?(\d{1,2}(?::\d{2})?)\s*(am|pm)?\s*[-–]\s*(?:to\s+)?(\d{1,2}(?::\d{2})?)\s*(am|pm)",
     re.I,
 )
 _TIME_RE = re.compile(
@@ -39,7 +40,7 @@ class CourseSection:
     seats_total: int = -1
     waitlist_available: int = -1
     waitlist_total: int = -1
-    section_type: str = ""     # "In-person lecture", "Online", "Hybrid"
+    section_type: str = ""     # "In-person", "Online", "Hybrid", "Remote" (or raw text)
     location: str = ""
     days: str = ""             # "Saturday", "Monday and Wednesday"
     time: str = ""             # "8am-4:50pm"
@@ -47,6 +48,8 @@ class CourseSection:
     instructor: str = ""
     fees: str = ""
     credits: str = ""
+    # (days, time) of additional meeting rows, e.g. a lab: [("Thursday", "3pm–5:50pm")]
+    extra_meetings: list[tuple[str, str]] = field(default_factory=list)
 
     @property
     def is_open(self) -> bool:
@@ -61,6 +64,8 @@ class CourseSection:
         if self.location:
             parts.append(self.location)
         schedule = " ".join(filter(None, [self.days, self.time]))
+        extras = [" ".join(filter(None, meeting)) for meeting in self.extra_meetings]
+        schedule = " + ".join(filter(None, [schedule, *extras]))
         if schedule:
             parts.append(schedule)
         if self.date_range:
@@ -198,9 +203,21 @@ def _detail_bs4(soup, course_code: str, title: str) -> list[CourseSection]:  # t
             if m:
                 page_credits = m.group(1)
 
-    # data-rows with a numeric 5-digit data-crn (skip continuation rows with data-crn="and")
-    for row in soup.find_all("tr", attrs={"data-crn": _CRN_DIGIT_RE}):
+    # data-rows with a numeric 5-digit data-crn; continuation rows with data-crn="and"
+    # hold another meeting (e.g. a lab) of the section row above them
+    last: CourseSection | None = None
+    for row in soup.find_all("tr", attrs={"data-crn": True}):
         crn = row["data-crn"]
+        if crn.strip().lower() == "and":
+            if last is not None:
+                cells = row.find_all(["th", "td"])
+                meeting = _parse_days_time(cells[3]) if len(cells) > 3 else ("", "")
+                if any(meeting):
+                    last.extra_meetings.append(meeting)
+            continue
+        if not _CRN_DIGIT_RE.search(crn):
+            last = None
+            continue
         try:
             seats = int(row.get("data-seats", 0))
         except ValueError:
@@ -231,6 +248,8 @@ def _detail_bs4(soup, course_code: str, title: str) -> list[CourseSection]:  # t
                     section_type = "Hybrid"
                 elif raw_type.lower().startswith("in-person") or raw_type.lower().startswith("in person"):
                     section_type = "In-person"
+                elif raw_type.lower().startswith("remote"):
+                    section_type = "Remote"  # scheduled online meetings — not in-person
                 else:
                     section_type = raw_type
             elif i == 2:
@@ -261,7 +280,7 @@ def _detail_bs4(soup, course_code: str, title: str) -> list[CourseSection]:  # t
                     if m:
                         fees = m.group(0)
 
-        sections.append(CourseSection(
+        last = CourseSection(
             course_code=course_code,
             title=title,
             crn=crn,
@@ -274,7 +293,8 @@ def _detail_bs4(soup, course_code: str, title: str) -> list[CourseSection]:  # t
             instructor=instructor,
             fees=fees,
             credits=page_credits,
-        ))
+        )
+        sections.append(last)
 
     logger.debug(f"Detail parser: {len(sections)} sections for {course_code}")
     return sections
@@ -294,14 +314,27 @@ def _parse_days_time(cell) -> tuple[str, str]:  # type: ignore[no-untyped-def]
     # Try "from 9:30 - to 11:50am" style first (PCC's primary format)
     m = _TIME_RANGE_RE.search(cell_text)
     if m:
-        start, end, ampm = m.group(1), m.group(2), m.group(3).lower()
-        time_str = f"{start}{ampm}–{end}{ampm}"
+        start, end, ampm = m.group(1), m.group(3), m.group(4).lower()
+        start_ampm = (m.group(2) or "").lower()
+        if not start_ampm:
+            # No am/pm on the start: same as the end, unless that puts the start
+            # after the end ("from 11 - to 12:50pm" crosses noon)
+            start_ampm = ampm
+            if _clock_minutes(start, ampm) > _clock_minutes(end, ampm):
+                start_ampm = "am"
+        time_str = f"{start}{start_ampm}–{end}{ampm}"
     else:
         m2 = _TIME_RE.search(cell_text)
         if m2:
             time_str = m2.group(0).strip()
 
     return days, time_str
+
+
+def _clock_minutes(clock: str, ampm: str) -> int:
+    """'12:50', 'pm' → 770 minutes since midnight."""
+    hour, _, minute = clock.partition(":")
+    return int(hour) % 12 * 60 + int(minute or 0) + (720 if ampm == "pm" else 0)
 
 
 def _clean_date(text: str) -> str:

@@ -1,4 +1,5 @@
 """Agent loop: routes through LLM provider chain (9Router → Groq → Ollama)."""
+from datetime import date
 from typing import AsyncIterator
 
 from loguru import logger
@@ -8,6 +9,7 @@ from src.agent.providers.nine_router_provider import NineRouterProvider
 from src.agent.providers.ollama_provider import OllamaProvider
 from src.agent.session import AgentSession, _MAX_HISTORY
 from src.config import settings
+from src.schedule.fetcher import TERM_LABELS, get_current_term
 
 _MAX_ITER = 6
 
@@ -56,6 +58,12 @@ def _build_messages(question: str, session: AgentSession) -> list[dict]:
     else:
         system += "\nCONTEXT: Real student data loaded from MyPCC and GRAD Plan."
 
+    term = get_current_term()
+    system += (
+        f"\nTODAY: {date.today():%B %d, %Y}. Tools default to {TERM_LABELS[term]} ('{term}')"
+        " when no term is given — pass an explicit term key for any other term."
+    )
+
     # Inject canonical academic state — prevents LLM from recomputing requirements
     if session.academic_state is not None:
         system += session.academic_state.to_llm_context()
@@ -89,13 +97,15 @@ def _build_provider_chain() -> list:
 
 async def agent_stream(question: str, session: AgentSession) -> AsyncIterator[str]:
     """Agentic tool-calling loop with automatic provider fallback chain."""
-    messages = _build_messages(question, session)
+    base_messages = _build_messages(question, session)
     providers = _build_provider_chain()
 
     for provider in providers:
         try:
+            # Providers append SDK message objects during tool rounds — give each its
+            # own copy so a provider that fails mid-turn can't poison the next one.
             async for chunk in provider.stream_with_tools(
-                messages, session, max_iterations=_MAX_ITER
+                list(base_messages), session, max_iterations=_MAX_ITER
             ):
                 yield chunk
             return

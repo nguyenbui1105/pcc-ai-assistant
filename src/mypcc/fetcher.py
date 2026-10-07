@@ -11,10 +11,21 @@ if TYPE_CHECKING:
 from playwright.async_api import async_playwright
 from loguru import logger
 
-from src.schedule.fetcher import TERM_LABELS, TERM_NAMES
+from src.schedule.fetcher import TERM_NAMES, resolve_term
 
-# Reverse map: "Summer 2026" → "summer2026"
-_TERM_LABEL_TO_KEY: dict[str, str] = {v: k for k, v in TERM_LABELS.items()}
+
+def _term_key_for_label(label: str) -> str:
+    """Map a term label ("Summer 2026") to its key ("summer2026"); "" if unknown.
+
+    Looked up per call (not a map built at import) so it follows the term tables,
+    which grow as the clock moves past the year they were built for.
+    """
+    if not label:
+        return ""
+    try:
+        return resolve_term(label)
+    except ValueError:
+        return ""
 
 
 class SessionExpiredError(Exception):
@@ -200,7 +211,7 @@ async def fetch_enrolled_times_async(
     import httpx
     from src.schedule.parser import parse_detail_html
 
-    term_key = _TERM_LABEL_TO_KEY.get(term_name, "")
+    term_key = _term_key_for_label(term_name)
     if not term_key:
         logger.warning(f"fetch_enrolled_times_async: unknown term label {term_name!r} — skipping")
         return {}

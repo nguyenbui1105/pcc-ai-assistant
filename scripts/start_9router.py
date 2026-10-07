@@ -15,7 +15,6 @@ Dashboard: http://localhost:20128  (configure providers + get API key)
 All models: http://localhost:20128/v1/models
 """
 import subprocess
-import sys
 
 
 def main() -> None:

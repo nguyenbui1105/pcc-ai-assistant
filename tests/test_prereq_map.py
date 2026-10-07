@@ -5,7 +5,6 @@ from src.schedule.prereq_map import (
     get_missing_prereqs,
     has_prereqs_met,
     get_superseded_courses,
-    PREREQS,
 )
 
 

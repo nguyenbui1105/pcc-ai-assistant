@@ -1,31 +1,48 @@
 """Fetch PCC class schedule pages — listing and course detail."""
 import asyncio
-from dataclasses import dataclass, field
+import re
 from datetime import datetime
 
 import httpx
 from loguru import logger
 
-TERM_CODES: dict[str, str] = {
-    "spring2026": "202602",
-    "summer2026": "202603",
-    "fall2026":   "202604",
-    "spring2027": "202702",
-}
+# PCC term codes are <calendar year><quarter>: 01 winter, 02 spring, 03 summer,
+# 04 fall — e.g. fall2026 → "202604", spring2027 → "202702".
+_SEASON_SUFFIX: dict[str, str] = {"winter": "01", "spring": "02", "summer": "03", "fall": "04"}
 
-TERM_NAMES: dict[str, str] = {
-    "spring2026": "spring",
-    "summer2026": "summer",
-    "fall2026":   "fall",
-    "spring2027": "spring",
-}
 
-TERM_LABELS: dict[str, str] = {
-    "spring2026": "Spring 2026",
-    "summer2026": "Summer 2026",
-    "fall2026":   "Fall 2026",
-    "spring2027": "Spring 2027",
-}
+def _build_term_tables(center_year: int) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """Build (codes, url slugs, labels) for every quarter from last year through next year."""
+    codes: dict[str, str] = {}
+    names: dict[str, str] = {}
+    labels: dict[str, str] = {}
+    for year in range(center_year - 1, center_year + 2):
+        for season, suffix in _SEASON_SUFFIX.items():
+            key = f"{season}{year}"
+            codes[key] = f"{year}{suffix}"
+            names[key] = season
+            labels[key] = f"{season.capitalize()} {year}"
+    return codes, names, labels
+
+
+# Term key ("fall2026") → PCC term code / URL slug ("fall") / display label ("Fall 2026").
+TERM_CODES, TERM_NAMES, TERM_LABELS = _build_term_tables(datetime.now().year)
+
+
+def _sync_term_tables() -> None:
+    """Extend the term tables once the clock moves past the year they were built for.
+
+    A long-running process would otherwise compute term keys that are missing from
+    the tables. Updates in place (never rebinds) so modules that imported the dicts
+    see the new keys.
+    """
+    codes, names, labels = _build_term_tables(datetime.now().year)
+    if codes.keys() <= TERM_CODES.keys():
+        return
+    TERM_CODES.update(codes)
+    TERM_NAMES.update(names)
+    TERM_LABELS.update(labels)
+
 
 _API_BASE = "https://www.pcc.edu/schedule/default.cfm"
 _HEADERS = {
@@ -39,7 +56,7 @@ _HEADERS = {
 
 
 def _listing_url(subject: str, term: str) -> str:
-    code = TERM_CODES.get(term, "202603")
+    code = TERM_CODES[resolve_term(term)]
     return (
         f"{_API_BASE}?fa=doadvquery&thisTerm={code}"
         f"&SubjectCode={subject.upper()}&dltype=*&queryTextType=AND"
@@ -58,9 +75,10 @@ async def _get(client: httpx.AsyncClient, url: str, label: str = "") -> str:
 
 
 async def fetch_listings_async(
-    subjects: list[str], term: str = "summer2026"
+    subjects: list[str], term: str | None = None
 ) -> dict[str, str]:
     """Fetch subject listing pages for multiple subjects concurrently."""
+    term = resolve_term(term)
     async with httpx.AsyncClient(follow_redirects=True, timeout=30.0) as client:
         results = await asyncio.gather(
             *[_get(client, _listing_url(s, term), f"listing:{s}/{term}") for s in subjects],
@@ -96,7 +114,7 @@ _CAPACITY_HEADERS = {
 
 
 async def fetch_capacity_async(
-    crns: list[str], term: str = "summer2026"
+    crns: list[str], term: str | None = None
 ) -> dict[str, dict]:
     """Fetch real seat counts for a list of CRNs.
 
@@ -104,7 +122,7 @@ async def fetch_capacity_async(
     """
     if not crns:
         return {}
-    term_code = TERM_CODES.get(term, "202603")
+    term_code = TERM_CODES[resolve_term(term)]
     crn_list = ",".join(crns)
     try:
         async with httpx.AsyncClient(follow_redirects=True, timeout=15.0) as client:
@@ -123,24 +141,52 @@ async def fetch_capacity_async(
 
 
 def get_current_term() -> str:
-    """Return the current/upcoming term key based on today's date.
+    """Return the default term key based on today's date.
 
     Jan–Mar → spring<year>, Apr–Jul → summer<year>, Aug–Dec → fall<year>.
-    Falls back to the last known term key if the computed key is not in TERM_CODES.
     """
+    _sync_term_tables()
     now = datetime.now()
-    year = now.year
-    month = now.month
-    if month <= 3:
-        key = f"spring{year}"
-    elif month <= 7:
-        key = f"summer{year}"
-    else:
-        key = f"fall{year}"
-    return key if key in TERM_CODES else list(TERM_CODES.keys())[-1]
+    if now.month <= 3:
+        return f"spring{now.year}"
+    if now.month <= 7:
+        return f"summer{now.year}"
+    return f"fall{now.year}"
 
 
-def fetch_listings(subjects: list[str], term: str = "summer2026") -> dict[str, str]:
+def get_in_session_term() -> str:
+    """Return the key of the term in session today (for "this term" labels).
+
+    Jan–Mar → winter, Apr–mid-Jun → spring, mid-Jun–Aug → summer, Sep–Dec → fall.
+    Unlike get_current_term() (the planning default) this can be a winter term.
+    """
+    _sync_term_tables()
+    now = datetime.now()
+    if now.month <= 3:
+        return f"winter{now.year}"
+    if (now.month, now.day) <= (6, 15):
+        return f"spring{now.year}"
+    if now.month <= 8:
+        return f"summer{now.year}"
+    return f"fall{now.year}"
+
+
+def resolve_term(term: str | None = None) -> str:
+    """Normalize a term ("Fall 2026", "fall-2026" → "fall2026"); empty → current term.
+
+    Raises ValueError for a term outside TERM_CODES so callers never silently
+    fetch a different term than the one asked for.
+    """
+    if not term:
+        return get_current_term()
+    _sync_term_tables()
+    key = re.sub(r"[\s_-]", "", term).lower()
+    if key not in TERM_CODES:
+        raise ValueError(f"Unknown term {term!r}. Valid terms: {', '.join(TERM_CODES)}")
+    return key
+
+
+def fetch_listings(subjects: list[str], term: str | None = None) -> dict[str, str]:
     return asyncio.run(fetch_listings_async(subjects, term))
 
 
@@ -148,5 +194,5 @@ def fetch_details(urls: list[str]) -> dict[str, str]:
     return asyncio.run(fetch_details_async(urls))
 
 
-def fetch_capacity(crns: list[str], term: str = "summer2026") -> dict[str, dict]:
+def fetch_capacity(crns: list[str], term: str | None = None) -> dict[str, dict]:
     return asyncio.run(fetch_capacity_async(crns, term))
